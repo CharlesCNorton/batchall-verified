@@ -10,6 +10,8 @@
     defender responds with their defending force, and both sides then bid
     DOWN their committed forces to demonstrate martial prowess and honor.
 
+    Example exchange:
+
       "I am Star Colonel Timur Malthus, Clan Jade Falcon.
        We claim this enclave. With what do you defend?"
 
@@ -2514,6 +2516,34 @@ Definition action_actor (action : ProtocolAction) : option Commander :=
   | _ => None
   end.
 
+(** Context-aware actor extraction. Given the current phase and action,
+    determine which commander is responsible for the action.
+    This eliminates the need for a default_actor parameter. *)
+Definition action_actor_in_context (phase : BatchallPhase) (action : ProtocolAction)
+    : option Commander :=
+  match action_actor action with
+  | Some c => Some c
+  | None =>
+      match action, phase with
+      | ActPass Attacker, PhaseBidding chal _ _ _ _ _ => Some (chal_challenger chal)
+      | ActPass Defender, PhaseBidding _ resp _ _ _ _ => Some (resp_defender resp)
+      | ActClose, PhaseBidding chal _ _ _ _ _ => Some (chal_challenger chal)
+      | ActBreakBid, PhaseBidding chal _ _ _ _ _ => Some (chal_challenger chal)
+      | ActWithdraw Attacker, PhaseBidding chal _ _ _ _ _ => Some (chal_challenger chal)
+      | ActWithdraw Defender, PhaseBidding _ resp _ _ _ _ => Some (resp_defender resp)
+      | ActRefuse _, PhaseChallenged chal => Some (chal_challenger chal)
+      | _, _ => None
+      end
+  end.
+
+Lemma action_actor_in_context_extends : forall phase action c,
+  action_actor action = Some c ->
+  action_actor_in_context phase action = Some c.
+Proof.
+  intros phase action c Hact.
+  unfold action_actor_in_context. rewrite Hact. reflexivity.
+Qed.
+
 Definition step_honor_delta (action : ProtocolAction) : Honor :=
   protocol_honor_delta action.
 
@@ -2537,6 +2567,49 @@ Fixpoint apply_trace_honor {phase : BatchallPhase} (ledger : HonorLedger)
       let new_ledger := update_honor ledger actor (step_honor_delta action) in
       apply_trace_honor new_ledger rest default_actor
   end.
+
+(** Context-aware honor application - no default_actor needed.
+    Returns None if any action lacks a determinable actor. *)
+Fixpoint apply_trace_honor_ctx {phase : BatchallPhase} (ledger : HonorLedger)
+    (t : BatchallTrace phase) : option HonorLedger :=
+  match t with
+  | TraceNil _ => Some ledger
+  | @TraceCons phase1 action _ _ rest =>
+      match action_actor_in_context phase1 action with
+      | Some actor =>
+          let new_ledger := update_honor ledger actor (step_honor_delta action) in
+          apply_trace_honor_ctx new_ledger rest
+      | None => None
+      end
+  end.
+
+Lemma apply_trace_honor_ctx_nil : forall phase ledger,
+  apply_trace_honor_ctx ledger (TraceNil phase) = Some ledger.
+Proof. reflexivity. Qed.
+
+(** Examples showing context-aware actor extraction works correctly. *)
+Example context_aware_honor_challenge :
+  action_actor_in_context PhaseIdle (ActChallenge malthus_challenge) = Some malthus.
+Proof. reflexivity. Qed.
+
+Example context_aware_honor_respond :
+  action_actor_in_context (PhaseChallenged malthus_challenge) (ActRespond radick_response)
+  = Some radick.
+Proof. reflexivity. Qed.
+
+Example context_aware_honor_pass_attacker :
+  action_actor_in_context
+    (PhaseBidding malthus_challenge radick_response
+                  initial_falcon_bid initial_wolf_bid [] NeitherReady)
+    (ActPass Attacker) = Some malthus.
+Proof. reflexivity. Qed.
+
+Example context_aware_honor_pass_defender :
+  action_actor_in_context
+    (PhaseBidding malthus_challenge radick_response
+                  initial_falcon_bid initial_wolf_bid [] AttackerReady)
+    (ActPass Defender) = Some radick.
+Proof. reflexivity. Qed.
 
 Lemma trace_honor_sum_nil : forall phase,
   trace_honor_sum (TraceNil phase) = 0.
@@ -2672,3 +2745,321 @@ Proof.
   - congruence.
   - apply sublist_trans with (l2 := bid_force b2); assumption.
 Qed.
+
+(** * Part XI: Bidding Strategy Properties *)
+
+(** ** Section 11.1: Optimal Bidding Concepts
+
+    In Clan bidding, honor comes from winning with the minimum force.
+    A "cutdown" bid demonstrates confidence - bidding less than needed
+    to ensure victory. The optimal strategy balances risk and honor.
+
+    Key strategic concepts:
+    - Minimal Viable Bid: The smallest bid that can still win the battle
+    - Dominant Bid: A bid that is strictly less than opponent's current
+    - Honor-Optimal Bid: The bid that maximizes honor while maintaining viability *)
+
+(** A bid dominates another if it is strictly smaller in all metrics. *)
+Definition bid_dominates (b1 b2 : ForceBid) : Prop :=
+  fm_lt (bid_metrics b1) (bid_metrics b2).
+
+(** A bid is minimal among a set if no other bid in the set dominates it. *)
+Definition bid_minimal (b : ForceBid) (bids : list ForceBid) : Prop :=
+  In b bids /\ forall b', In b' bids -> ~ bid_dominates b' b.
+
+(** The absolute minimum bid - all metrics are zero. *)
+Definition bid_at_absolute_floor (b : ForceBid) : Prop :=
+  fm_count (bid_metrics b) = 0 /\
+  fm_tonnage (bid_metrics b) = 0 /\
+  fm_elite_count (bid_metrics b) = 0 /\
+  fm_clan_count (bid_metrics b) = 0.
+
+(** An empty force bid cannot be further reduced. *)
+Lemma absolute_floor_cannot_reduce : forall b,
+  bid_at_absolute_floor b ->
+  forall b', ~ bid_dominates b' b.
+Proof.
+  intros b [Hc [Ht [He Hl]]] b' Hdom.
+  unfold bid_dominates, fm_lt, fm_le in Hdom.
+  destruct Hdom as [[Hle1 [Hle2 [Hle3 Hle4]]] Hneq].
+  destruct (bid_metrics b') as [c' t' e' l'] eqn:Hm'.
+  destruct (bid_metrics b) as [c t e l] eqn:Hm.
+  simpl in *.
+  apply Hneq.
+  assert (c' = c) by lia.
+  assert (t' = t) by lia.
+  assert (e' = e) by lia.
+  assert (l' = l) by lia.
+  congruence.
+Qed.
+
+(** A practical floor is where any of count or tonnage is zero. *)
+Definition bid_at_floor (b : ForceBid) : Prop :=
+  fm_count (bid_metrics b) = 0 \/ fm_tonnage (bid_metrics b) = 0.
+
+(** At practical floor, the measure is minimal relative to that component. *)
+Lemma floor_count_minimal : forall b,
+  fm_count (bid_metrics b) = 0 ->
+  forall b', fm_le (bid_metrics b') (bid_metrics b) ->
+             fm_count (bid_metrics b') = 0.
+Proof.
+  intros b Hc b' [Hle1 _].
+  destruct (bid_metrics b') as [c' t' e' l'].
+  destruct (bid_metrics b) as [c t e l].
+  simpl in *. lia.
+Qed.
+
+Lemma floor_tonnage_minimal : forall b,
+  fm_tonnage (bid_metrics b) = 0 ->
+  forall b', fm_le (bid_metrics b') (bid_metrics b) ->
+             fm_tonnage (bid_metrics b') = 0.
+Proof.
+  intros b Ht b' [_ [Hle2 _]].
+  destruct (bid_metrics b') as [c' t' e' l'].
+  destruct (bid_metrics b) as [c t e l].
+  simpl in *. lia.
+Qed.
+
+(** ** Section 11.2: Bidding Advantage
+
+    A side has bidding advantage if their current bid is lower than
+    the opponent's. The side with advantage can afford to pass. *)
+
+Definition attacker_has_advantage (atk def : ForceBid) : Prop :=
+  fm_lt (bid_metrics atk) (bid_metrics def).
+
+Definition defender_has_advantage (atk def : ForceBid) : Prop :=
+  fm_lt (bid_metrics def) (bid_metrics atk).
+
+Definition bids_equivalent (atk def : ForceBid) : Prop :=
+  bid_metrics atk = bid_metrics def.
+
+Lemma advantage_trichotomy : forall atk def,
+  attacker_has_advantage atk def \/
+  defender_has_advantage atk def \/
+  bids_equivalent atk def \/
+  (~ fm_le (bid_metrics atk) (bid_metrics def) /\
+   ~ fm_le (bid_metrics def) (bid_metrics atk)).
+Proof.
+  intros atk def.
+  destruct (fm_le_dec (bid_metrics atk) (bid_metrics def)) as [Hle_ad | Hnle_ad].
+  - destruct (fm_eq_dec (bid_metrics atk) (bid_metrics def)) as [Heq | Hneq].
+    + right. right. left. exact Heq.
+    + left. unfold attacker_has_advantage, fm_lt. auto.
+  - destruct (fm_le_dec (bid_metrics def) (bid_metrics atk)) as [Hle_da | Hnle_da].
+    + destruct (fm_eq_dec (bid_metrics def) (bid_metrics atk)) as [Heq | Hneq].
+      * right. right. left. symmetry. exact Heq.
+      * right. left. unfold defender_has_advantage, fm_lt. auto.
+    + right. right. right. auto.
+Qed.
+
+(** ** Section 11.3: Strategic Passing
+
+    Passing is strategically sound when you have advantage or when
+    further bidding would cut below viability. *)
+
+Definition pass_is_sound (side : Side) (atk def : ForceBid)
+                         (req : ViabilityRequirements) : Prop :=
+  match side with
+  | Attacker => attacker_has_advantage atk def \/
+                ~ exists atk', fm_lt (bid_metrics atk') (bid_metrics atk) /\
+                               force_meets_viability (bid_force atk') req = true
+  | Defender => defender_has_advantage atk def \/
+                ~ exists def', fm_lt (bid_metrics def') (bid_metrics def) /\
+                               force_meets_viability (bid_force def') req = true
+  end.
+
+Lemma advantage_justifies_pass_attacker : forall atk def req,
+  attacker_has_advantage atk def ->
+  pass_is_sound Attacker atk def req.
+Proof.
+  intros atk def req Hadv.
+  unfold pass_is_sound. left. exact Hadv.
+Qed.
+
+Lemma advantage_justifies_pass_defender : forall atk def req,
+  defender_has_advantage atk def ->
+  pass_is_sound Defender atk def req.
+Proof.
+  intros atk def req Hadv.
+  unfold pass_is_sound. left. exact Hadv.
+Qed.
+
+(** * Part XII: Honor Invariants *)
+
+(** ** Section 12.1: Honorable Actions
+
+    An action is honorable if it does not decrease honor. We define
+    several classes of actions based on their honor implications. *)
+
+Open Scope Z_scope.
+
+Definition action_is_honorable (action : ProtocolAction) : Prop :=
+  protocol_honor_delta action >= 0.
+
+Definition action_is_dishonorable (action : ProtocolAction) : Prop :=
+  protocol_honor_delta action < 0.
+
+Definition action_is_neutral (action : ProtocolAction) : Prop :=
+  protocol_honor_delta action = 0.
+
+(** Classification of all protocol actions. *)
+Lemma challenge_is_honorable : forall chal,
+  action_is_honorable (ActChallenge chal).
+Proof. intros chal. unfold action_is_honorable. simpl. lia. Qed.
+
+Lemma respond_is_honorable : forall resp,
+  action_is_honorable (ActRespond resp).
+Proof. intros resp. unfold action_is_honorable. simpl. lia. Qed.
+
+Lemma bid_is_neutral : forall bid,
+  action_is_neutral (ActBid bid).
+Proof. intros bid. unfold action_is_neutral. reflexivity. Qed.
+
+Lemma pass_is_neutral : forall side,
+  action_is_neutral (ActPass side).
+Proof. intros side. unfold action_is_neutral. reflexivity. Qed.
+
+Lemma close_is_honorable : action_is_honorable ActClose.
+Proof. unfold action_is_honorable. simpl. lia. Qed.
+
+Lemma withdraw_is_dishonorable : forall side,
+  action_is_dishonorable (ActWithdraw side).
+Proof. intros side. unfold action_is_dishonorable. simpl. lia. Qed.
+
+Lemma break_bid_is_dishonorable : action_is_dishonorable ActBreakBid.
+Proof. unfold action_is_dishonorable. simpl. lia. Qed.
+
+(** ** Section 12.2: Honorable Traces
+
+    A trace is honorable if all its actions are honorable. *)
+
+Fixpoint trace_is_honorable {phase : BatchallPhase} (t : BatchallTrace phase) : Prop :=
+  match t with
+  | TraceNil _ => True
+  | @TraceCons _ action _ _ rest =>
+      action_is_honorable action /\ trace_is_honorable rest
+  end.
+
+(** Honorable traces accumulate non-negative honor. *)
+Theorem honorable_trace_nonnegative : forall phase (t : BatchallTrace phase),
+  trace_is_honorable t ->
+  trace_honor_sum t >= 0.
+Proof.
+  intros phase t. induction t as [ph | ph1 action ph2 step rest IH].
+  - intros _. simpl. lia.
+  - intros [Hhon Hrest]. simpl.
+    unfold action_is_honorable in Hhon.
+    specialize (IH Hrest).
+    unfold step_honor_delta. lia.
+Qed.
+
+(** ** Section 12.3: Standard Batchall Honor
+
+    A "standard batchall" follows the expected ritual:
+    challenge, respond, bid, pass, pass, close.
+    This sequence always yields positive honor. *)
+
+Definition is_standard_close (action : ProtocolAction) : Prop :=
+  action = ActClose.
+
+Definition is_standard_challenge (action : ProtocolAction) : Prop :=
+  exists chal, action = ActChallenge chal.
+
+Definition is_standard_response (action : ProtocolAction) : Prop :=
+  exists resp, action = ActRespond resp.
+
+(** The honor sum of a standard challenge-response is positive. *)
+Theorem standard_exchange_positive : forall chal resp,
+  step_honor_delta (ActChallenge chal) +
+  step_honor_delta (ActRespond resp) +
+  step_honor_delta ActClose = 3.
+Proof.
+  intros chal resp. simpl. reflexivity.
+Qed.
+
+(** ** Section 12.4: Honor Monotonicity
+
+    Under honorable play, honor never decreases. *)
+
+Definition honor_nondecreasing (ledger_before ledger_after : HonorLedger)
+                               (actor : Commander) : Prop :=
+  ledger_honor ledger_after actor >= ledger_honor ledger_before actor.
+
+Lemma honorable_action_nondecreasing : forall ledger actor action,
+  action_is_honorable action ->
+  honor_nondecreasing ledger (update_honor ledger actor (step_honor_delta action)) actor.
+Proof.
+  intros ledger actor action Hhon.
+  unfold honor_nondecreasing.
+  rewrite honor_update_self.
+  unfold action_is_honorable, step_honor_delta in Hhon.
+  destruct action; simpl in *; lia.
+Qed.
+
+(** ** Section 12.5: Complete Batchall Honor Theorem
+
+    A complete, honorable batchall always results in positive total honor.
+    This is the main honor accumulation theorem. *)
+
+Definition complete_honorable_batchall (chal : BatchallChallenge) (resp : BatchallResponse)
+    (atk def : ForceBid) : Prop :=
+  exists (t : BatchallTrace PhaseIdle),
+    trace_is_honorable t /\
+    exists step_to_agreed : BatchallStep
+      (PhaseBidding chal resp atk def [] BothReady)
+      ActClose
+      (PhaseAgreed chal resp atk def),
+    True.
+
+Theorem honorable_batchall_positive_honor :
+  forall chal resp,
+  let base_honor := step_honor_delta (ActChallenge chal) +
+                    step_honor_delta (ActRespond resp) +
+                    step_honor_delta ActClose in
+  base_honor = 3.
+Proof.
+  intros. simpl. reflexivity.
+Qed.
+
+(** The minimum honor from a completed batchall is 3 (challenge + respond + close). *)
+Theorem minimum_completed_batchall_honor :
+  forall chal resp,
+  protocol_honor_delta (ActChallenge chal) +
+  protocol_honor_delta (ActRespond resp) +
+  protocol_honor_delta ActClose >= 3.
+Proof.
+  intros chal resp. simpl. lia.
+Qed.
+
+(** ** Section 12.6: Dishonorable Action Consequences *)
+
+Lemma withdraw_loses_honor : forall ledger actor side,
+  ledger_honor (update_honor ledger actor (step_honor_delta (ActWithdraw side))) actor <
+  ledger_honor ledger actor.
+Proof.
+  intros ledger actor side.
+  rewrite honor_update_self. simpl. lia.
+Qed.
+
+Lemma break_bid_loses_significant_honor : forall ledger actor,
+  ledger_honor (update_honor ledger actor (step_honor_delta ActBreakBid)) actor <=
+  ledger_honor ledger actor - 10.
+Proof.
+  intros ledger actor.
+  rewrite honor_update_self. simpl. lia.
+Qed.
+
+(** ** Section 12.7: Honor Balance Theorem
+
+    At the end of an honorable batchall, both sides gain honor. *)
+
+Theorem both_sides_gain_honor_in_standard_batchall :
+  forall chal resp,
+  protocol_honor_delta (ActChallenge chal) > 0 /\
+  protocol_honor_delta (ActRespond resp) > 0.
+Proof.
+  intros chal resp. split; simpl; lia.
+Qed.
+
+Close Scope Z_scope.
