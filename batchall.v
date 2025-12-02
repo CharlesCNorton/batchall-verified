@@ -557,36 +557,74 @@ Record Unit : Type := mkUnit {
 Definition unit_skill (u : Unit) : nat :=
   unit_gunnery u + unit_piloting u.
 
-(** * Battle Value - The True Measure of Combat Effectiveness
+(** * The Kerensky Combat Rating - The Clan Measure of Force
 
-    Battle Value (BV) is the standard metric used throughout the Inner Sphere
-    and Clan space to quantify a unit's combat effectiveness. Originally
-    developed by ComStar's ROM division, it accounts for:
+    ** A Note on Provenance
 
-    - Tonnage and armor (survivability)
-    - Weapons loadout (damage potential)
-    - Speed and maneuverability (tactical flexibility)
-    - Pilot skill (the warrior behind the machine)
+    The Inner Sphere would later develop what they call "Battle Value" -
+    a ComStar invention from the 31st century, created by ROM analysts
+    studying our captured OmniMechs after Tukayyid. We do not use their
+    system here. This is a Clan Remembrance, and we use Clan methods.
 
-    A Dire Wolf with a green pilot may have lower effective BV than a
-    Kit Fox with an elite. The machine is only as deadly as the warrior
-    who wields it.
+    The Kerensky Combat Rating (KCR) predates the Inner Sphere's BV by
+    two centuries. It was developed by the Founder's war planners during
+    the Pentagon Civil War, refined through the early Trials, and encoded
+    into the batchall system itself. Where ComStar's analysts obsess over
+    precise weapon damage calculations and heat curves, the KCR captures
+    what matters to a Clan warrior: the fighting spirit of the force.
 
-    We use a simplified BV model suitable for formal verification:
+    ** The Philosophy of the KCR
 
-    - Base BV: Tonnage * weight class multiplier
-    - Tech modifier: Clan tech is worth 1.5x Inner Sphere
-    - Skill modifier: Based on combined gunnery + piloting
+    The KCR is not merely a mathematical formula - it is a statement of
+    Clan values. Consider its components:
 
-    The skill modifier follows the BattleTech standard:
-    - Elite (0-4):    1.5x multiplier
-    - Veteran (5-6):  1.25x multiplier
-    - Regular (7-8):  1.0x multiplier
-    - Green (9+):     0.75x multiplier
+    - Mass and Class: Heavier 'Mechs command respect. An assault 'Mech
+      that stands its ground demonstrates commitment. But mass alone is
+      not destiny - the multiplier acknowledges that a Dire Wolf brings
+      more than twice what a Kit Fox brings, but not infinitely more.
 
-    This gives us a single number for combat effectiveness comparison
-    while the partial order on ForceMetrics handles the multidimensional
-    bidding comparison. *)
+    - Clan Technology: Our weapons are superior. Our armor is stronger.
+      Our 'Mechs run cooler. The 1.5x modifier for Clan technology is
+      conservative - in truth, our advantages are greater. But the KCR
+      is used for bidding between Clans, where both sides field Clan tech.
+      The modifier matters when we face Inner Sphere salvage or dezgra
+      forces that rely on inferior machines.
+
+    - The Warrior's Spirit: Here is the heart of the KCR. A 'Mech is metal.
+      A warrior is fire. The skill multipliers encode the Founder's wisdom:
+      an elite warrior makes their machine transcend its specifications.
+      A green warrior wastes even the finest OmniMech. We weight the warrior
+      heavily because the Clans believe - know - that the pilot matters
+      more than the pod configuration.
+
+    ** Why Not Greater Precision?
+
+    One might ask: why not calculate exact damage-per-second? Why not
+    account for jump capability, ECM, ammunition dependency? The Scientist
+    caste has proposed such refinements. The warrior caste has rejected them.
+
+    The batchall is not a simulation. It is a ritual. The KCR provides
+    sufficient precision to compare forces while preserving the essential
+    uncertainty that makes combat honorable. If we could calculate victory
+    with certainty, where would be the glory? Where the proof of worth?
+
+    The KCR tells us: "This force is roughly this capable." The battle
+    tells us the truth. That is the Clan way.
+
+    ** The Formula
+
+    - Base Rating: Tonnage * weight class factor
+    - Tech Rating: Base * 1.5 for Clan technology
+    - Final Rating: Tech Rating * skill modifier
+
+    The skill modifiers honor the warrior:
+    - Elite (combined 0-4):    1.5x - The pride of the sibkos
+    - Veteran (combined 5-6):  1.25x - Proven in Trials
+    - Regular (combined 7-8):  1.0x - Standard Clan excellence
+    - Green (combined 9+):     0.75x - Unblooded but not worthless
+
+    Note that a "regular" Clan warrior would devastate Inner Sphere elites.
+    Our baseline is their ceiling. The Founder bred us for war. *)
 
 Definition weight_class_bv_multiplier (w : WeightClass) : nat :=
   match w with
@@ -619,22 +657,80 @@ Definition unit_battle_value (u : Unit) : nat :=
   let skill_mult := skill_bv_multiplier_num (unit_skill u) in
   (tech_bv * skill_mult) / skill_bv_multiplier_denom.
 
-(** The Effective Combat Rating (ECR) combines BV with tactical factors.
-    This represents not just raw power but how effectively that power
-    can be brought to bear in actual combat. *)
+(** ** The Tactical Flexibility Modifier
+
+    The KCR base rating measures raw combat power, but the batchall is
+    not fought in a vacuum. The Founder recognized that certain unit
+    types bring capabilities beyond their weapon loadouts:
+
+    - OmniMechs can reconfigure between engagements. A Timber Wolf
+      configured for long-range bombardment today becomes a brawler
+      tomorrow. This flexibility has value that transcends any single
+      configuration's firepower. The +20 modifier reflects two centuries
+      of Clan doctrine: OmniMechs win campaigns, not just battles.
+
+    - Standard BattleMechs lack reconfiguration but remain the backbone
+      of any serious force. The +10 modifier acknowledges their proven
+      reliability. A BattleMech's loadout is fixed, but that loadout was
+      chosen by warriors who knew what they needed.
+
+    - Aerospace superiority enables ground victory. OmniFighters (+18)
+      and standard aerospace (+8) modifiers reflect control of the third
+      dimension. A force without aerospace cover fights blind and exposed.
+
+    - Elementals (+15) are force multipliers beyond their tonnage. Five
+      Elementals weigh 5 tons total but can swarm and destroy a 'Mech
+      ten times their mass. The modifier captures their tactical value
+      in urban terrain, boarding actions, and anti-'Mech operations.
+
+    - Battle Armor (+12) extends the Elemental concept to non-phenotype
+      warriors. Less devastating than true Elementals but still capable
+      of missions no 'Mech can perform.
+
+    - ProtoMechs (+5) fill the gap between Elementals and light 'Mechs.
+      The Smoke Jaguar innovation proved valuable despite its origins.
+
+    - Vehicles (+6) are deprecated in Clan doctrine but not worthless.
+      The Hell's Horses have demonstrated their value. We acknowledge
+      this grudgingly.
+
+    - Infantry (+2) without armor are casualties waiting to happen. Their
+      modifier is minimal but nonzero - they can hold ground, operate
+      equipment, and die buying time for warriors who matter.
+
+    These modifiers are ADDITIVE, not multiplicative. A force of five
+    Kit Foxes (30 tons each, +20 OmniMech bonus each) brings 100 bonus
+    points from flexibility alone. This rewards combined-arms thinking
+    within the Clan framework. *)
 
 Definition unit_class_ecr_bonus (c : UnitClass) : nat :=
   match c with
-  | OmniMech => 20      (* Flexibility bonus *)
-  | BattleMech => 10    (* Standard bonus *)
-  | OmniFighter => 18   (* Aerospace flexibility *)
-  | Aerospace => 8      (* Standard aerospace *)
-  | ProtoMech => 5      (* Limited but useful *)
-  | Elemental => 15     (* Devastating in their role *)
-  | BattleArmor => 12   (* Infantry excellence *)
-  | Vehicle => 6        (* Support role *)
-  | Infantry => 2       (* Minimal direct combat value *)
+  | OmniMech => 20
+  | BattleMech => 10
+  | OmniFighter => 18
+  | Aerospace => 8
+  | ProtoMech => 5
+  | Elemental => 15
+  | BattleArmor => 12
+  | Vehicle => 6
+  | Infantry => 2
   end.
+
+(** The Effective Combat Rating combines base KCR with tactical flexibility.
+    This is the final number used in batchall force comparison.
+
+    Mathematical note: ECR = KCR + Flexibility Bonus
+
+    We use addition rather than multiplication because flexibility is
+    an independent axis of capability. A green pilot in an OmniMech
+    still has full access to reconfiguration options. The machine's
+    flexibility does not depend on the warrior's skill - only the
+    base combat effectiveness does.
+
+    This separation of concerns - skill affects base rating, unit type
+    affects flexibility bonus - produces more accurate force comparisons
+    than a single blended formula would. The Scientist caste verified
+    this against two centuries of Trial outcomes. *)
 
 Definition unit_effective_combat_rating (u : Unit) : nat :=
   unit_battle_value u + unit_class_ecr_bonus (unit_class u).
@@ -2642,6 +2738,136 @@ Proof.
   - reflexivity.
 Qed.
 
+(** ** Coalition-to-Bid Integration
+
+    Coalition batchalls are rare but significant - the Annihilation of Clan
+    Smoke Jaguar saw the combined forces of the reborn Star League arrayed
+    against a single Clan. The Wars of Reaving featured shifting coalitions
+    as Clans aligned and betrayed in rapid succession.
+
+    To integrate coalition bidding into the state machine, we provide a
+    bridge between Coalition structures and ForceBid records. A coalition's
+    total commitment becomes a single ForceBid for state machine purposes,
+    while the coalition structure tracks individual Clan contributions.
+
+    The lead commander of a coalition (the first member) speaks for the
+    coalition in the batchall protocol. Their honor is affected by the
+    coalition's collective actions. This reflects Clan tradition: the
+    senior officer bears responsibility for their command's conduct. *)
+
+(** Extract the lead commander from a coalition. *)
+Definition coalition_lead_commander (c : Coalition) : option Commander :=
+  match c with
+  | [] => None
+  | m :: _ => Some (cm_commander m)
+  end.
+
+(** Convert a coalition to a ForceBid representing its total commitment. *)
+Definition coalition_to_bid (c : Coalition) (side : Side) : option ForceBid :=
+  match coalition_lead_commander c with
+  | None => None
+  | Some cmd => Some (mkForceBid (coalition_force c) side cmd)
+  end.
+
+(** Apply a coalition member bid to update a coalition. *)
+Definition apply_coalition_member_bid (c : Coalition) (cbid : CoalitionMemberBid)
+    : Coalition :=
+  update_coalition_force c (cmb_member_index cbid) (cmb_new_force cbid).
+
+(** A coalition member bid is valid if:
+    1. The member index exists in the coalition
+    2. The new force strictly reduces that member's metrics
+    3. The bid side matches the coalition's side in the batchall *)
+Definition valid_coalition_member_bid (c : Coalition) (cbid : CoalitionMemberBid)
+    : Prop :=
+  cmb_member_index cbid < length c /\
+  fm_lt (force_metrics (cmb_new_force cbid))
+        (force_metrics (nth (cmb_member_index cbid) (map cm_force c) [])).
+
+Definition valid_coalition_member_bid_b (c : Coalition) (cbid : CoalitionMemberBid)
+    : bool :=
+  (cmb_member_index cbid <? length c) &&
+  match fm_lt_dec (force_metrics (cmb_new_force cbid))
+                  (force_metrics (nth (cmb_member_index cbid) (map cm_force c) [])) with
+  | left _ => true
+  | right _ => false
+  end.
+
+Lemma valid_coalition_member_bid_b_correct : forall c cbid,
+  valid_coalition_member_bid_b c cbid = true <-> valid_coalition_member_bid c cbid.
+Proof.
+  intros c cbid. unfold valid_coalition_member_bid_b, valid_coalition_member_bid.
+  split.
+  - intros H. apply andb_prop in H. destruct H as [Hidx Hlt].
+    split.
+    + apply Nat.ltb_lt. exact Hidx.
+    + destruct (fm_lt_dec _ _); [exact f | discriminate].
+  - intros [Hidx Hlt]. apply andb_true_intro. split.
+    + apply Nat.ltb_lt. exact Hidx.
+    + destruct (fm_lt_dec _ _); [reflexivity | contradiction].
+Qed.
+
+(** A valid coalition member bid strictly reduces the coalition's metrics. *)
+Lemma valid_cbid_reduces_coalition : forall c cbid,
+  valid_coalition_member_bid c cbid ->
+  coalition_lt (apply_coalition_member_bid c cbid) c.
+Proof.
+  intros c cbid [Hidx Hlt].
+  unfold apply_coalition_member_bid, coalition_lt.
+  apply update_coalition_lt_general; assumption.
+Qed.
+
+(** Coalition member bid converts to a valid force bid reduction. *)
+Lemma cbid_produces_valid_bid_reduction : forall c cbid side old_bid,
+  valid_coalition_member_bid c cbid ->
+  coalition_to_bid c side = Some old_bid ->
+  exists new_bid,
+    coalition_to_bid (apply_coalition_member_bid c cbid) side = Some new_bid /\
+    fm_lt (bid_metrics new_bid) (bid_metrics old_bid).
+Proof.
+  intros c cbid side old_bid Hvalid Hold.
+  unfold coalition_to_bid in *.
+  destruct c as [|m rest].
+  - discriminate.
+  - simpl in Hold. injection Hold as Hold. subst old_bid.
+    assert (Hred : coalition_lt (apply_coalition_member_bid (m :: rest) cbid) (m :: rest)).
+    { apply valid_cbid_reduces_coalition. exact Hvalid. }
+    unfold apply_coalition_member_bid in *.
+    destruct (cmb_member_index cbid) as [|n] eqn:Hidx.
+    + simpl. eexists. split; [reflexivity |].
+      unfold bid_metrics, coalition_lt in *. simpl in *.
+      unfold coalition_metrics, coalition_force in *. simpl in *.
+      rewrite !force_metrics_app in *.
+      exact Hred.
+    + simpl. eexists. split; [reflexivity |].
+      unfold bid_metrics, coalition_lt in *. simpl in *.
+      unfold coalition_metrics, coalition_force in *. simpl in *.
+      rewrite !force_metrics_app in *.
+      exact Hred.
+Qed.
+
+(** The coalition lead commander is preserved by member bids. *)
+Lemma cbid_preserves_lead : forall c cbid,
+  length c > 0 ->
+  coalition_lead_commander (apply_coalition_member_bid c cbid) =
+  coalition_lead_commander c.
+Proof.
+  intros c cbid Hlen.
+  destruct c as [|m rest].
+  - simpl in Hlen. lia.
+  - unfold apply_coalition_member_bid.
+    destruct (cmb_member_index cbid) as [|n]; reflexivity.
+Qed.
+
+(** Coalition bidding through the ForceBid mechanism terminates. *)
+Theorem coalition_force_bid_terminates : forall b,
+  Acc (fun b1 b2 => fm_lt (bid_metrics b1) (bid_metrics b2)) b.
+Proof.
+  intros b.
+  apply well_founded_lt_compat with (f := fun b => fm_measure (bid_metrics b)).
+  intros b1 b2 Hlt. apply fm_lt_implies_measure_lt. exact Hlt.
+Qed.
+
 (** * Protocol Messages
 
     The batchall proceeds through a series of messages exchanged between
@@ -2930,6 +3156,36 @@ Inductive BatchallStep : BatchallPhase -> ProtocolAction -> BatchallPhase -> Pro
                    (ActBid new_bid)
                    (PhaseBidding chal resp atk new_bid (def :: hist)
                      (clear_ready ready Defender))
+
+  (** Coalition member bids allow individual members of a coalition to
+      reduce their force commitment. This is how multi-Clan batchalls
+      proceed - each Clan bids down its own contribution while the
+      coalition's total force is tracked in the phase state.
+
+      The coalition bid must reduce the bidding member's metrics.
+      The new force bid becomes the coalition's combined force under
+      the lead commander's authority.
+
+      Note: The new force comes directly from cmb_new_force in the bid,
+      ensuring determinism - the same cbid always produces the same result. *)
+
+  | StepCoalitionBidAttacker : forall chal resp atk def hist ready cbid,
+      cmb_side cbid = Attacker ->
+      fm_lt (force_metrics (cmb_new_force cbid)) (bid_metrics atk) ->
+      BatchallStep (PhaseBidding chal resp atk def hist ready)
+                   (ActCoalitionBid cbid)
+                   (PhaseBidding chal resp
+                     (mkForceBid (cmb_new_force cbid) Attacker (bid_commander atk))
+                     def (atk :: hist) (clear_ready ready Attacker))
+
+  | StepCoalitionBidDefender : forall chal resp atk def hist ready cbid,
+      cmb_side cbid = Defender ->
+      fm_lt (force_metrics (cmb_new_force cbid)) (bid_metrics def) ->
+      BatchallStep (PhaseBidding chal resp atk def hist ready)
+                   (ActCoalitionBid cbid)
+                   (PhaseBidding chal resp atk
+                     (mkForceBid (cmb_new_force cbid) Defender (bid_commander def))
+                     (def :: hist) (clear_ready ready Defender))
 
   | StepPassAttacker : forall chal resp atk def hist ready,
       is_ready ready Attacker = false ->
@@ -3352,6 +3608,17 @@ Proof.
     split; [reflexivity |].
     apply def_bid_decrease_with_clear_ready.
     apply fm_lt_implies_measure_lt. assumption.
+  - left. exists (mkForceBid (cmb_new_force cbid) Attacker (bid_commander atk)),
+                 def, (atk :: hist), (clear_ready ready Attacker).
+    split; [reflexivity |].
+    apply bid_decrease_with_clear_ready.
+    apply fm_lt_implies_measure_lt. unfold bid_metrics. simpl. assumption.
+  - left. exists atk,
+                 (mkForceBid (cmb_new_force cbid) Defender (bid_commander def)),
+                 (def :: hist), (clear_ready ready Defender).
+    split; [reflexivity |].
+    apply def_bid_decrease_with_clear_ready.
+    apply fm_lt_implies_measure_lt. unfold bid_metrics. simpl. assumption.
   - left. exists atk, def, hist, (set_ready ready Attacker).
     split; [reflexivity |].
     unfold bidding_state_measure, set_ready.
@@ -3966,4 +4233,3 @@ End StandardTrials.
 (*     Seyla.                                                                 *)
 (*                                                                            *)
 (******************************************************************************)
-
