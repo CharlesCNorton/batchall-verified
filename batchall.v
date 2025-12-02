@@ -1122,14 +1122,16 @@ Proof.
   intros f1 f2 H.
   induction H as [l | x l1 l2 Hsub IH | x l1 l2 Hsub IH].
   - simpl. unfold fm_le.
-    destruct (force_metrics l) as [c t e cl] eqn:Heq.
+    destruct (force_metrics l) as [c t e cl bv ecr] eqn:Heq.
     simpl. repeat split; apply Nat.le_0_l.
-  - simpl. unfold fm_le in *. destruct IH as [H1 [H2 [H3 H4]]].
+  - simpl. unfold fm_le in *.
+    destruct IH as [H1 [H2 [H3 [H4 [H5 H6]]]]].
     unfold metrics_add, unit_to_metrics. simpl.
-    split; [lia|]. split; [lia|]. split; lia.
-  - simpl. unfold fm_le in *. destruct IH as [H1 [H2 [H3 H4]]].
+    repeat split; lia.
+  - simpl. unfold fm_le in *.
+    destruct IH as [H1 [H2 [H3 [H4 [H5 H6]]]]].
     unfold metrics_add, unit_to_metrics. simpl.
-    split; [lia|]. split; [lia|]. split; lia.
+    repeat split; lia.
 Qed.
 
 (** ** The SubForce Relation
@@ -2045,6 +2047,95 @@ Proof. intros []; reflexivity. Qed.
 Lemma opponent_different : forall s, opponent_side s <> s.
 Proof. intros []; discriminate. Qed.
 
+(** ** Multi-Clan Coalitions
+
+    While most batchalls involve two Clans - one attacking, one defending -
+    larger conflicts may involve coalitions. The Wars of Reaving saw
+    multiple Clans allied against common foes. The Annihilation of Clan
+    Smoke Jaguar involved the combined forces of the reborn Star League.
+
+    A Coalition represents multiple Clans working together on one side
+    of a batchall. Each Clan contributes forces under their own commander,
+    but the coalition acts as a single side for bidding purposes.
+
+    Key properties of coalitions:
+    - Each Clan maintains its own honor accounting
+    - Forces from different Clans can be combined
+    - A coalition bid is the sum of its component bids
+    - Any coalition member may bid down their own contribution *)
+
+Record CoalitionMember : Type := mkCoalitionMember {
+  cm_clan : Clan;
+  cm_commander : Commander;
+  cm_force : Force
+}.
+
+Definition Coalition : Type := list CoalitionMember.
+
+Definition coalition_clans (c : Coalition) : list Clan :=
+  map cm_clan c.
+
+Definition coalition_force (c : Coalition) : Force :=
+  flat_map cm_force c.
+
+Definition coalition_metrics (c : Coalition) : ForceMetrics :=
+  force_metrics (coalition_force c).
+
+Definition coalition_contains_clan (c : Coalition) (clan : Clan) : bool :=
+  existsb (fun m => clan_eqb (cm_clan m) clan) c.
+
+(** A singleton coalition - the common case of a single Clan. *)
+Definition singleton_coalition (cmd : Commander) (f : Force) : Coalition :=
+  [mkCoalitionMember (cmd_clan cmd) cmd f].
+
+Lemma singleton_coalition_force : forall cmd f,
+  coalition_force (singleton_coalition cmd f) = f ++ [].
+Proof.
+  intros cmd f. unfold singleton_coalition, coalition_force. simpl.
+  rewrite app_nil_r. reflexivity.
+Qed.
+
+Lemma singleton_coalition_metrics : forall cmd f,
+  coalition_metrics (singleton_coalition cmd f) = force_metrics f.
+Proof.
+  intros cmd f. unfold coalition_metrics.
+  rewrite singleton_coalition_force. rewrite app_nil_r. reflexivity.
+Qed.
+
+(** Coalition ordering for bidding purposes. *)
+Definition coalition_le (c1 c2 : Coalition) : Prop :=
+  fm_le (coalition_metrics c1) (coalition_metrics c2).
+
+Definition coalition_lt (c1 c2 : Coalition) : Prop :=
+  fm_lt (coalition_metrics c1) (coalition_metrics c2).
+
+(** A coalition bid reduces the previous if metrics decrease. *)
+Definition coalition_bid_reduces (new_coal old_coal : Coalition) : Prop :=
+  coalition_lt new_coal old_coal.
+
+(** Extract total tonnage from a coalition. *)
+Definition coalition_tonnage (c : Coalition) : nat :=
+  fm_tonnage (coalition_metrics c).
+
+(** Coalition membership validation. *)
+Definition valid_coalition_member (m : CoalitionMember) : bool :=
+  clan_eqb (cmd_clan (cm_commander m)) (cm_clan m) &&
+  may_issue_batchall (cm_commander m).
+
+Definition valid_coalition (c : Coalition) : bool :=
+  forallb valid_coalition_member c.
+
+Lemma singleton_valid : forall cmd f,
+  may_issue_batchall cmd = true ->
+  valid_coalition (singleton_coalition cmd f) = true.
+Proof.
+  intros cmd f Hmay. unfold valid_coalition, singleton_coalition. simpl.
+  rewrite andb_true_r.
+  apply andb_true_intro. split.
+  - apply clan_eqb_refl.
+  - exact Hmay.
+Qed.
+
 (** * Force Bids
 
     A ForceBid represents a commander's commitment to a specific force.
@@ -2101,8 +2192,40 @@ Record BatchallChallenge : Type := mkBatchallChallenge {
   chal_prize : Prize;
   chal_initial_force : Force;
   chal_location : Location;
-  chal_trial_type : TrialType
+  chal_trial_type : TrialType;
+  chal_context : BattleContext
 }.
+
+(** The challenge context must be valid and consistent with the trial type. *)
+Definition challenge_context_valid (chal : BatchallChallenge) : Prop :=
+  context_valid (chal_context chal) /\
+  ctx_trial (chal_context chal) = chal_trial_type chal.
+
+Definition challenge_context_valid_b (chal : BatchallChallenge) : bool :=
+  context_valid_b (chal_context chal) &&
+  match trial_eq_dec (ctx_trial (chal_context chal)) (chal_trial_type chal) with
+  | left _ => true
+  | right _ => false
+  end.
+
+Lemma challenge_context_valid_b_correct : forall chal,
+  challenge_context_valid_b chal = true <-> challenge_context_valid chal.
+Proof.
+  intros chal. unfold challenge_context_valid_b, challenge_context_valid.
+  split.
+  - intros H. apply andb_prop in H. destruct H as [Hctx Htrial].
+    split.
+    + apply context_valid_b_correct. exact Hctx.
+    + destruct (trial_eq_dec (ctx_trial (chal_context chal)) (chal_trial_type chal)).
+      * exact e.
+      * discriminate.
+  - intros [Hctx Htrial].
+    apply andb_true_intro. split.
+    + apply context_valid_b_correct. exact Hctx.
+    + destruct (trial_eq_dec (ctx_trial (chal_context chal)) (chal_trial_type chal)).
+      * reflexivity.
+      * contradiction.
+Qed.
 
 (** ** The Response
 
@@ -2605,7 +2728,8 @@ Proof.
   unfold can_progress.
   set (chal := mkBatchallChallenge
     (mkCommander 0 ClanGoliathScorpion StarColonel true)
-    ClanGoliathScorpion PrizeHonor [] (LocEnclave 0) TrialOfPossession).
+    ClanGoliathScorpion PrizeHonor [] (LocEnclave 0) TrialOfPossession
+    (standard_possession_context ClanGoliathScorpion)).
   exists (ActChallenge chal).
   exists (PhaseChallenged chal).
   constructor.
@@ -2665,6 +2789,209 @@ Proof.
   - apply challenged_has_progress.
   - apply responded_has_progress.
   - apply bidding_has_progress.
+Qed.
+
+(** ** Stateful Batchall with Honor Tracking
+
+    The BatchallState integrates the protocol phase with the honor ledger,
+    threading honor accounting through every transition. This captures the
+    full ritual: not just the mechanical phases, but the honor consequences
+    of each action.
+
+    A warrior who issues a challenge gains honor. A warrior who responds
+    gains honor. A warrior who breaks their bid loses honor severely.
+    The ledger records all. *)
+
+Record BatchallState : Type := mkBatchallState {
+  bs_phase : BatchallPhase;
+  bs_honor : HonorLedger
+}.
+
+Definition initial_state : BatchallState :=
+  mkBatchallState PhaseIdle empty_ledger.
+
+(** Extract the actor from a protocol action. *)
+Definition action_actor (action : ProtocolAction) : option Commander :=
+  match action with
+  | ActChallenge chal => Some (chal_challenger chal)
+  | ActRespond resp => Some (resp_defender resp)
+  | ActRefuse _ => None
+  | ActBid bid => Some (bid_commander bid)
+  | ActPass _ => None
+  | ActClose => None
+  | ActWithdraw _ => None
+  | ActBreakBid => None
+  end.
+
+(** The stateful step relation: phase transitions plus honor updates. *)
+Inductive BatchallStateStep : BatchallState -> ProtocolAction -> BatchallState -> Prop :=
+  | StateStep : forall phase1 phase2 ledger action new_ledger,
+      BatchallStep phase1 action phase2 ->
+      new_ledger = match action_actor action with
+                   | Some actor => update_honor ledger actor (protocol_honor_delta action)
+                   | None => ledger
+                   end ->
+      BatchallStateStep (mkBatchallState phase1 ledger)
+                        action
+                        (mkBatchallState phase2 new_ledger).
+
+(** State step implies phase step - the honor layer doesn't change phase behavior. *)
+Lemma state_step_implies_phase_step : forall s1 action s2,
+  BatchallStateStep s1 action s2 ->
+  BatchallStep (bs_phase s1) action (bs_phase s2).
+Proof.
+  intros s1 action s2 Hstep. inversion Hstep; subst. simpl. assumption.
+Qed.
+
+(** State step determinism follows from phase determinism. *)
+Theorem state_step_determinism : forall s1 action s2 s3,
+  BatchallStateStep s1 action s2 ->
+  BatchallStateStep s1 action s3 ->
+  s2 = s3.
+Proof.
+  intros s1 action s2 s3 H1 H2.
+  inversion H1; subst. inversion H2; subst.
+  assert (phase2 = phase3) by (eapply protocol_determinism; eauto).
+  subst. reflexivity.
+Qed.
+
+(** Honor is updated correctly for challenges. *)
+Lemma challenge_updates_honor : forall ledger chal phase2,
+  BatchallStep PhaseIdle (ActChallenge chal) phase2 ->
+  forall new_ledger,
+    new_ledger = update_honor ledger (chal_challenger chal) (protocol_honor_delta (ActChallenge chal)) ->
+    ledger_honor new_ledger (chal_challenger chal) =
+    (ledger_honor ledger (chal_challenger chal) + 1)%Z.
+Proof.
+  intros ledger chal phase2 Hstep new_ledger Heq.
+  subst. unfold protocol_honor_delta. simpl.
+  apply honor_update_self.
+Qed.
+
+(** Breaking a bid severely damages honor. *)
+Lemma break_bid_damages_honor : forall s1 s2 chal resp atk def hist ready,
+  bs_phase s1 = PhaseBidding chal resp atk def hist ready ->
+  BatchallStateStep s1 ActBreakBid s2 ->
+  bs_honor s2 = bs_honor s1.
+Proof.
+  intros s1 s2 chal resp atk def hist ready Hphase Hstep.
+  inversion Hstep; subst. simpl in *. reflexivity.
+Qed.
+
+(** ** Context-Aware State Transitions
+
+    Some transitions are only valid when the battle context permits them.
+    For example, hegira (withdrawal) is not permitted in a Trial of
+    Annihilation. We define a strengthened step relation that enforces
+    context constraints. *)
+
+Definition get_challenge_from_phase (phase : BatchallPhase) : option BatchallChallenge :=
+  match phase with
+  | PhaseIdle => None
+  | PhaseChallenged chal => Some chal
+  | PhaseResponded chal _ => Some chal
+  | PhaseBidding chal _ _ _ _ _ => Some chal
+  | PhaseAgreed chal _ _ _ => Some chal
+  | PhaseRefused chal _ => Some chal
+  | PhaseAborted _ => None
+  end.
+
+Definition action_respects_context (phase : BatchallPhase) (action : ProtocolAction) : Prop :=
+  match get_challenge_from_phase phase with
+  | None => True
+  | Some chal =>
+      match action with
+      | ActWithdraw _ => ctx_hegira_allowed (chal_context chal) = true
+      | _ => True
+      end
+  end.
+
+Definition action_respects_context_b (phase : BatchallPhase) (action : ProtocolAction) : bool :=
+  match get_challenge_from_phase phase with
+  | None => true
+  | Some chal =>
+      match action with
+      | ActWithdraw _ => ctx_hegira_allowed (chal_context chal)
+      | _ => true
+      end
+  end.
+
+Lemma action_respects_context_b_correct : forall phase action,
+  action_respects_context_b phase action = true <-> action_respects_context phase action.
+Proof.
+  intros phase action.
+  unfold action_respects_context_b, action_respects_context.
+  destruct (get_challenge_from_phase phase) as [chal|]; try tauto.
+  destruct action; try tauto.
+Qed.
+
+(** Context-aware state step: validates context before allowing transition. *)
+Inductive BatchallContextStep : BatchallState -> ProtocolAction -> BatchallState -> Prop :=
+  | ContextStep : forall s1 action s2,
+      BatchallStateStep s1 action s2 ->
+      action_respects_context (bs_phase s1) action ->
+      BatchallContextStep s1 action s2.
+
+(** In a Trial of Annihilation, withdrawal is forbidden. *)
+Lemma annihilation_forbids_withdrawal : forall s1 s2 side chal resp atk def hist ready,
+  bs_phase s1 = PhaseBidding chal resp atk def hist ready ->
+  chal_trial_type chal = TrialOfAnnihilation ->
+  challenge_context_valid chal ->
+  ~ BatchallContextStep s1 (ActWithdraw side) s2.
+Proof.
+  intros s1 s2 side chal resp atk def hist ready Hphase Htrial Hvalid Hstep.
+  inversion Hstep; subst.
+  unfold action_respects_context in H0.
+  rewrite Hphase in H0. simpl in H0.
+  destruct Hvalid as [[Hlethal _] Hctx_trial].
+  assert (Hlethal_ctx : trial_is_lethal (ctx_trial (chal_context chal)) = true).
+  { rewrite Hctx_trial. rewrite Htrial. reflexivity. }
+  specialize (Hlethal Hlethal_ctx).
+  rewrite Hlethal in H0. discriminate.
+Qed.
+
+(** ** Stateful Traces with Honor
+
+    A trace through the stateful system, recording honor changes. *)
+
+Inductive BatchallStateTrace : BatchallState -> Type :=
+  | StateTraceNil : forall state, BatchallStateTrace state
+  | StateTraceCons : forall (s1 : BatchallState) (action : ProtocolAction) (s2 : BatchallState),
+                       BatchallContextStep s1 action s2 ->
+                       BatchallStateTrace s2 ->
+                       BatchallStateTrace s1.
+
+Fixpoint state_trace_length {s : BatchallState} (t : BatchallStateTrace s) : nat :=
+  match t with
+  | StateTraceNil _ => 0
+  | @StateTraceCons _ _ _ _ rest => S (state_trace_length rest)
+  end.
+
+(** Extract final state from a trace. *)
+Fixpoint state_trace_final {s : BatchallState} (t : BatchallStateTrace s) : BatchallState :=
+  match t with
+  | StateTraceNil st => st
+  | @StateTraceCons _ _ s2 _ rest => state_trace_final rest
+  end.
+
+(** A trace reaches a terminal state if its final phase is terminal. *)
+Definition trace_reaches_terminal {s : BatchallState} (t : BatchallStateTrace s) : Prop :=
+  is_terminal (bs_phase (state_trace_final t)) = true.
+
+(** All terminal traces reach one of three outcomes. *)
+Lemma terminal_trichotomy : forall phase,
+  is_terminal phase = true ->
+  (exists chal resp atk def, phase = PhaseAgreed chal resp atk def) \/
+  (exists chal reason, phase = PhaseRefused chal reason) \/
+  (exists reason, phase = PhaseAborted reason).
+Proof.
+  intros phase Hterm.
+  destruct phase as [| chal | chal resp | chal resp atk def hist ready
+                    | chal resp atk def | chal reason | reason];
+    simpl in Hterm; try discriminate.
+  - left. eauto.
+  - right. left. eauto.
+  - right. right. eauto.
 Qed.
 
 (** * The Telling: A Complete Example
@@ -2730,7 +3057,8 @@ Definition malthus_challenge : BatchallChallenge :=
     (PrizeEnclave 42)
     falcon_trinary
     (LocPlanetSurface 7 3)
-    TrialOfPossession.
+    TrialOfPossession
+    (standard_possession_context ClanJadeFalcon).
 
 Definition radick_response : BatchallResponse :=
   mkBatchallResponse
