@@ -557,6 +557,165 @@ Record Unit : Type := mkUnit {
 Definition unit_skill (u : Unit) : nat :=
   unit_gunnery u + unit_piloting u.
 
+(** * Battle Value - The True Measure of Combat Effectiveness
+
+    Battle Value (BV) is the standard metric used throughout the Inner Sphere
+    and Clan space to quantify a unit's combat effectiveness. Originally
+    developed by ComStar's ROM division, it accounts for:
+
+    - Tonnage and armor (survivability)
+    - Weapons loadout (damage potential)
+    - Speed and maneuverability (tactical flexibility)
+    - Pilot skill (the warrior behind the machine)
+
+    A Dire Wolf with a green pilot may have lower effective BV than a
+    Kit Fox with an elite. The machine is only as deadly as the warrior
+    who wields it.
+
+    We use a simplified BV model suitable for formal verification:
+
+    - Base BV: Tonnage * weight class multiplier
+    - Tech modifier: Clan tech is worth 1.5x Inner Sphere
+    - Skill modifier: Based on combined gunnery + piloting
+
+    The skill modifier follows the BattleTech standard:
+    - Elite (0-4):    1.5x multiplier
+    - Veteran (5-6):  1.25x multiplier
+    - Regular (7-8):  1.0x multiplier
+    - Green (9+):     0.75x multiplier
+
+    This gives us a single number for combat effectiveness comparison
+    while the partial order on ForceMetrics handles the multidimensional
+    bidding comparison. *)
+
+Definition weight_class_bv_multiplier (w : WeightClass) : nat :=
+  match w with
+  | Ultralight => 8    (* Light scouts, low base value *)
+  | Light => 10        (* Standard light 'Mechs *)
+  | Medium => 12       (* Backbone of most forces *)
+  | Heavy => 15        (* Significant combat assets *)
+  | Assault => 18      (* Primary battle units *)
+  | SuperHeavy => 22   (* Devastating but rare *)
+  end.
+
+Definition skill_bv_multiplier_num (skill : nat) : nat :=
+  if skill <=? 4 then 6      (* Elite: 1.5x = 6/4 *)
+  else if skill <=? 6 then 5 (* Veteran: 1.25x = 5/4 *)
+  else if skill <=? 8 then 4 (* Regular: 1.0x = 4/4 *)
+  else 3.                    (* Green: 0.75x = 3/4 *)
+
+Definition skill_bv_multiplier_denom : nat := 4.
+
+Definition unit_base_bv (u : Unit) : nat :=
+  unit_tonnage u * weight_class_bv_multiplier (unit_weight u).
+
+Definition unit_tech_bv (u : Unit) : nat :=
+  let base := unit_base_bv u in
+  if unit_is_clan u then base + base / 2  (* 1.5x for Clan tech *)
+  else base.
+
+Definition unit_battle_value (u : Unit) : nat :=
+  let tech_bv := unit_tech_bv u in
+  let skill_mult := skill_bv_multiplier_num (unit_skill u) in
+  (tech_bv * skill_mult) / skill_bv_multiplier_denom.
+
+(** The Effective Combat Rating (ECR) combines BV with tactical factors.
+    This represents not just raw power but how effectively that power
+    can be brought to bear in actual combat. *)
+
+Definition unit_class_ecr_bonus (c : UnitClass) : nat :=
+  match c with
+  | OmniMech => 20      (* Flexibility bonus *)
+  | BattleMech => 10    (* Standard bonus *)
+  | OmniFighter => 18   (* Aerospace flexibility *)
+  | Aerospace => 8      (* Standard aerospace *)
+  | ProtoMech => 5      (* Limited but useful *)
+  | Elemental => 15     (* Devastating in their role *)
+  | BattleArmor => 12   (* Infantry excellence *)
+  | Vehicle => 6        (* Support role *)
+  | Infantry => 2       (* Minimal direct combat value *)
+  end.
+
+Definition unit_effective_combat_rating (u : Unit) : nat :=
+  unit_battle_value u + unit_class_ecr_bonus (unit_class u).
+
+(** Key lemmas about combat effectiveness. *)
+
+Lemma base_bv_positive : forall u, unit_tonnage u > 0 -> unit_base_bv u > 0.
+Proof.
+  intros u Hton. unfold unit_base_bv.
+  destruct (unit_weight u); simpl; lia.
+Qed.
+
+Lemma tech_bv_positive : forall u, unit_tonnage u > 0 -> unit_tech_bv u > 0.
+Proof.
+  intros u Hton. unfold unit_tech_bv, unit_base_bv.
+  destruct (unit_is_clan u); destruct (unit_weight u); simpl; lia.
+Qed.
+
+Lemma skill_mult_positive : forall n, skill_bv_multiplier_num n >= 3.
+Proof.
+  intros n. unfold skill_bv_multiplier_num.
+  destruct (n <=? 4); try lia.
+  destruct (n <=? 6); try lia.
+  destruct (n <=? 8); lia.
+Qed.
+
+Lemma tech_bv_ge_tonnage : forall u,
+  unit_tech_bv u >= unit_tonnage u * 8.
+Proof.
+  intros u. unfold unit_tech_bv, unit_base_bv.
+  destruct (unit_is_clan u); destruct (unit_weight u); simpl; lia.
+Qed.
+
+Lemma bv_positive : forall u, unit_tonnage u > 0 -> unit_battle_value u > 0.
+Proof.
+  intros u Hton. unfold unit_battle_value, skill_bv_multiplier_denom.
+  apply Nat.div_str_pos.
+  pose proof (tech_bv_ge_tonnage u) as Htech.
+  pose proof (skill_mult_positive (unit_skill u)) as Hskill.
+  nia.
+Qed.
+
+Lemma clan_tech_increases_bv : forall u,
+  unit_tonnage u > 0 ->
+  unit_is_clan u = true ->
+  unit_tech_bv u > unit_base_bv u.
+Proof.
+  intros u Hton Hclan. unfold unit_tech_bv.
+  rewrite Hclan. unfold unit_base_bv.
+  set (base := unit_tonnage u * weight_class_bv_multiplier (unit_weight u)).
+  assert (Hbase : base >= 8).
+  { unfold base. destruct (unit_weight u); simpl; lia. }
+  assert (Hdiv : base / 2 >= 1).
+  { apply Nat.div_le_lower_bound; lia. }
+  lia.
+Qed.
+
+Lemma elite_skill_maximizes_bv : forall u,
+  unit_skill u <= 4 ->
+  skill_bv_multiplier_num (unit_skill u) = 6.
+Proof.
+  intros u Hskill. unfold skill_bv_multiplier_num.
+  destruct (unit_skill u <=? 4) eqn:H.
+  - reflexivity.
+  - apply Nat.leb_gt in H. lia.
+Qed.
+
+Lemma green_skill_minimizes_bv : forall u,
+  unit_skill u >= 9 ->
+  skill_bv_multiplier_num (unit_skill u) = 3.
+Proof.
+  intros u Hskill. unfold skill_bv_multiplier_num.
+  destruct (unit_skill u <=? 4) eqn:H1.
+  - apply Nat.leb_le in H1. lia.
+  - destruct (unit_skill u <=? 6) eqn:H2.
+    + apply Nat.leb_le in H2. lia.
+    + destruct (unit_skill u <=? 8) eqn:H3.
+      * apply Nat.leb_le in H3. lia.
+      * reflexivity.
+Qed.
+
 (** Skill classifications based on combined rating. *)
 Definition is_elite_skill (u : Unit) : bool :=
   unit_skill u <=? 4.
@@ -634,12 +793,14 @@ Record ForceMetrics : Type := mkForceMetrics {
   fm_count : nat;        (* Number of units *)
   fm_tonnage : nat;      (* Total tonnage *)
   fm_elite_count : nat;  (* Number of elite warriors *)
-  fm_clan_count : nat    (* Number of Clan-tech units *)
+  fm_clan_count : nat;   (* Number of Clan-tech units *)
+  fm_total_bv : nat;     (* Total Battle Value - combat effectiveness *)
+  fm_total_ecr : nat     (* Total Effective Combat Rating *)
 }.
 
 (** The empty force - no units, no commitment, no honor. *)
 Definition empty_metrics : ForceMetrics :=
-  mkForceMetrics 0 0 0 0.
+  mkForceMetrics 0 0 0 0 0 0.
 
 (** Convert a single unit to its metric contribution. *)
 Definition unit_to_metrics (u : Unit) : ForceMetrics :=
@@ -647,7 +808,9 @@ Definition unit_to_metrics (u : Unit) : ForceMetrics :=
     1
     (unit_tonnage u)
     (if unit_is_elite u then 1 else 0)
-    (if unit_is_clan u then 1 else 0).
+    (if unit_is_clan u then 1 else 0)
+    (unit_battle_value u)
+    (unit_effective_combat_rating u).
 
 (** ** Metrics Arithmetic
 
@@ -667,7 +830,9 @@ Definition metrics_add (m1 m2 : ForceMetrics) : ForceMetrics :=
     (fm_count m1 + fm_count m2)
     (fm_tonnage m1 + fm_tonnage m2)
     (fm_elite_count m1 + fm_elite_count m2)
-    (fm_clan_count m1 + fm_clan_count m2).
+    (fm_clan_count m1 + fm_clan_count m2)
+    (fm_total_bv m1 + fm_total_bv m2)
+    (fm_total_ecr m1 + fm_total_ecr m2).
 
 (** Compute the metrics of a force by folding over its units. *)
 Definition force_metrics (f : Force) : ForceMetrics :=
@@ -678,37 +843,42 @@ Definition force_metrics (f : Force) : ForceMetrics :=
 Lemma metrics_add_comm : forall m1 m2,
   metrics_add m1 m2 = metrics_add m2 m1.
 Proof.
-  intros [c1 t1 e1 l1] [c2 t2 e2 l2].
+  intros [c1 t1 e1 l1 bv1 ecr1] [c2 t2 e2 l2 bv2 ecr2].
   unfold metrics_add. simpl.
   rewrite (Nat.add_comm c1 c2).
   rewrite (Nat.add_comm t1 t2).
   rewrite (Nat.add_comm e1 e2).
   rewrite (Nat.add_comm l1 l2).
+  rewrite (Nat.add_comm bv1 bv2).
+  rewrite (Nat.add_comm ecr1 ecr2).
   reflexivity.
 Qed.
 
 Lemma metrics_add_assoc : forall m1 m2 m3,
   metrics_add m1 (metrics_add m2 m3) = metrics_add (metrics_add m1 m2) m3.
 Proof.
-  intros [c1 t1 e1 l1] [c2 t2 e2 l2] [c3 t3 e3 l3].
+  intros [c1 t1 e1 l1 bv1 ecr1] [c2 t2 e2 l2 bv2 ecr2] [c3 t3 e3 l3 bv3 ecr3].
   unfold metrics_add. simpl.
   rewrite (Nat.add_assoc c1 c2 c3).
   rewrite (Nat.add_assoc t1 t2 t3).
   rewrite (Nat.add_assoc e1 e2 e3).
   rewrite (Nat.add_assoc l1 l2 l3).
+  rewrite (Nat.add_assoc bv1 bv2 bv3).
+  rewrite (Nat.add_assoc ecr1 ecr2 ecr3).
   reflexivity.
 Qed.
 
 Lemma metrics_add_empty_l : forall m,
   metrics_add empty_metrics m = m.
 Proof.
-  intros [c t e l]. unfold metrics_add, empty_metrics. reflexivity.
+  intros [c t e l bv ecr]. unfold metrics_add, empty_metrics. reflexivity.
 Qed.
 
 Lemma metrics_add_empty_r : forall m,
   metrics_add m empty_metrics = m.
 Proof.
-  intros [c t e l]. unfold metrics_add, empty_metrics. simpl.
+  intros [c t e l bv ecr]. unfold metrics_add, empty_metrics. simpl.
+  rewrite Nat.add_0_r. rewrite Nat.add_0_r.
   rewrite Nat.add_0_r. rewrite Nat.add_0_r.
   rewrite Nat.add_0_r. rewrite Nat.add_0_r.
   reflexivity.
@@ -745,7 +915,9 @@ Definition fm_le (m1 m2 : ForceMetrics) : Prop :=
   fm_count m1 <= fm_count m2 /\
   fm_tonnage m1 <= fm_tonnage m2 /\
   fm_elite_count m1 <= fm_elite_count m2 /\
-  fm_clan_count m1 <= fm_clan_count m2.
+  fm_clan_count m1 <= fm_clan_count m2 /\
+  fm_total_bv m1 <= fm_total_bv m2 /\
+  fm_total_ecr m1 <= fm_total_ecr m2.
 
 Definition fm_lt (m1 m2 : ForceMetrics) : Prop :=
   fm_le m1 m2 /\ m1 <> m2.
@@ -760,17 +932,21 @@ Proof.
   destruct (le_dec (fm_tonnage m1) (fm_tonnage m2));
   destruct (le_dec (fm_elite_count m1) (fm_elite_count m2));
   destruct (le_dec (fm_clan_count m1) (fm_clan_count m2));
-  try (left; auto; fail);
-  right; intros [H1 [H2 [H3 H4]]]; contradiction.
+  destruct (le_dec (fm_total_bv m1) (fm_total_bv m2));
+  destruct (le_dec (fm_total_ecr m1) (fm_total_ecr m2));
+  try (left; repeat split; assumption);
+  right; intros [H1 [H2 [H3 [H4 [H5 H6]]]]]; contradiction.
 Defined.
 
 Definition fm_eq_dec : forall m1 m2 : ForceMetrics, {m1 = m2} + {m1 <> m2}.
 Proof.
-  intros [c1 t1 e1 l1] [c2 t2 e2 l2].
+  intros [c1 t1 e1 l1 bv1 ecr1] [c2 t2 e2 l2 bv2 ecr2].
   destruct (Nat.eq_dec c1 c2);
   destruct (Nat.eq_dec t1 t2);
   destruct (Nat.eq_dec e1 e2);
   destruct (Nat.eq_dec l1 l2);
+  destruct (Nat.eq_dec bv1 bv2);
+  destruct (Nat.eq_dec ecr1 ecr2);
   try (left; congruence);
   right; congruence.
 Defined.
@@ -793,22 +969,22 @@ Defined.
 
 Lemma fm_le_refl : forall m, fm_le m m.
 Proof.
-  intros m. unfold fm_le. auto.
+  intros m. unfold fm_le. repeat split; auto.
 Qed.
 
 Lemma fm_le_trans : forall m1 m2 m3,
   fm_le m1 m2 -> fm_le m2 m3 -> fm_le m1 m3.
 Proof.
-  intros m1 m2 m3 [H1a [H1b [H1c H1d]]] [H2a [H2b [H2c H2d]]].
+  intros m1 m2 m3 [H1a [H1b [H1c [H1d [H1e H1f]]]]] [H2a [H2b [H2c [H2d [H2e H2f]]]]].
   unfold fm_le. repeat split; lia.
 Qed.
 
 Lemma fm_le_antisym : forall m1 m2,
   fm_le m1 m2 -> fm_le m2 m1 -> m1 = m2.
 Proof.
-  intros [c1 t1 e1 l1] [c2 t2 e2 l2].
+  intros [c1 t1 e1 l1 bv1 ecr1] [c2 t2 e2 l2 bv2 ecr2].
   unfold fm_le. simpl.
-  intros [H1a [H1b [H1c H1d]]] [H2a [H2b [H2c H2d]]].
+  intros [H1a [H1b [H1c [H1d [H1e H1f]]]]] [H2a [H2b [H2c [H2d [H2e H2f]]]]].
   f_equal; lia.
 Qed.
 
@@ -828,27 +1004,30 @@ Qed.
     measure decreases. Since the natural numbers are well-founded under <,
     so is fm_lt.
 
-    The measure is simply the sum of all four components. Any strict decrease
+    The measure is simply the sum of all six components. Any strict decrease
     in the partial order must decrease at least one component while not
     increasing any others - hence the sum must decrease. *)
 
 Definition fm_measure (m : ForceMetrics) : nat :=
-  fm_count m + fm_tonnage m + fm_elite_count m + fm_clan_count m.
+  fm_count m + fm_tonnage m + fm_elite_count m + fm_clan_count m +
+  fm_total_bv m + fm_total_ecr m.
 
 Lemma fm_lt_implies_measure_lt : forall m1 m2,
   fm_lt m1 m2 -> fm_measure m1 < fm_measure m2.
 Proof.
-  intros m1 m2 [[H1 [H2 [H3 H4]]] Hneq].
+  intros m1 m2 [[H1 [H2 [H3 [H4 [H5 H6]]]]] Hneq].
   unfold fm_measure.
-  destruct m1 as [c1 t1 e1 l1].
-  destruct m2 as [c2 t2 e2 l2].
+  destruct m1 as [c1 t1 e1 l1 bv1 ecr1].
+  destruct m2 as [c2 t2 e2 l2 bv2 ecr2].
   simpl in *.
-  destruct (Nat.eq_dec (c1 + t1 + e1 + l1) (c2 + t2 + e2 + l2)).
+  destruct (Nat.eq_dec (c1 + t1 + e1 + l1 + bv1 + ecr1) (c2 + t2 + e2 + l2 + bv2 + ecr2)).
   - exfalso. apply Hneq.
     assert (c1 = c2) by lia.
     assert (t1 = t2) by lia.
     assert (e1 = e2) by lia.
     assert (l1 = l2) by lia.
+    assert (bv1 = bv2) by lia.
+    assert (ecr1 = ecr2) by lia.
     subst. reflexivity.
   - lia.
 Qed.
@@ -2243,6 +2422,118 @@ Proof.
   intros phase action phase1 phase2 H1 H2.
   inversion H1; subst; inversion H2; subst; try reflexivity; try congruence.
 Qed.
+
+(** ** Negative Examples: Invalid Transitions Are Rejected
+
+    The batchall state machine is not merely permissive - it actively
+    rejects invalid transitions. These negative examples demonstrate
+    that the system enforces the ritual's requirements. A warrior cannot
+    skip phases, cannot bid higher than their current commitment, cannot
+    close without both sides ready, and cannot act out of turn.
+
+    These proofs strengthen our claim that the formalization correctly
+    captures the batchall protocol. It is not enough to show that valid
+    transitions succeed; we must also show that invalid transitions fail. *)
+
+(** You cannot respond to a challenge that was never issued. *)
+Lemma cannot_respond_from_idle : forall resp phase',
+  ~ BatchallStep PhaseIdle (ActRespond resp) phase'.
+Proof.
+  intros resp phase' H. inversion H.
+Qed.
+
+(** You cannot skip the response phase and jump directly to bidding. *)
+Lemma cannot_bid_before_response : forall chal bid phase',
+  ~ BatchallStep (PhaseChallenged chal) (ActBid bid) phase'.
+Proof.
+  intros chal bid phase' H. inversion H.
+Qed.
+
+(** You cannot close the bidding unless both sides have passed. *)
+Lemma cannot_close_without_both_ready_neither : forall chal resp atk def hist phase',
+  ~ BatchallStep (PhaseBidding chal resp atk def hist NeitherReady) ActClose phase'.
+Proof.
+  intros chal resp atk def hist phase' H. inversion H.
+Qed.
+
+Lemma cannot_close_without_both_ready_atk : forall chal resp atk def hist phase',
+  ~ BatchallStep (PhaseBidding chal resp atk def hist AttackerReady) ActClose phase'.
+Proof.
+  intros chal resp atk def hist phase' H. inversion H.
+Qed.
+
+Lemma cannot_close_without_both_ready_def : forall chal resp atk def hist phase',
+  ~ BatchallStep (PhaseBidding chal resp atk def hist DefenderReady) ActClose phase'.
+Proof.
+  intros chal resp atk def hist phase' H. inversion H.
+Qed.
+
+(** A bid that does not reduce the force metrics is invalid. *)
+Lemma cannot_bid_higher : forall chal resp atk def hist ready new_bid phase',
+  bid_side new_bid = Attacker ->
+  ~ fm_lt (bid_metrics new_bid) (bid_metrics atk) ->
+  ~ BatchallStep (PhaseBidding chal resp atk def hist ready) (ActBid new_bid) phase'.
+Proof.
+  intros chal resp atk def hist ready new_bid phase' Hside Hnot_lt Hstep.
+  inversion Hstep; subst.
+  - apply Hnot_lt. assumption.
+  - congruence.
+Qed.
+
+(** You cannot pass if you have already passed and the opponent hasn't bid. *)
+Lemma cannot_double_pass : forall chal resp atk def hist phase',
+  ~ BatchallStep (PhaseBidding chal resp atk def hist AttackerReady) (ActPass Attacker) phase'.
+Proof.
+  intros chal resp atk def hist phase' H. inversion H. discriminate.
+Qed.
+
+(** You cannot issue a challenge when one is already pending. *)
+Lemma cannot_challenge_twice : forall chal1 chal2 phase',
+  ~ BatchallStep (PhaseChallenged chal1) (ActChallenge chal2) phase'.
+Proof.
+  intros chal1 chal2 phase' H. inversion H.
+Qed.
+
+(** You cannot refuse a challenge from the responded phase - too late. *)
+Lemma cannot_refuse_after_response : forall chal resp reason phase',
+  ~ BatchallStep (PhaseResponded chal resp) (ActRefuse reason) phase'.
+Proof.
+  intros chal resp reason phase' H. inversion H.
+Qed.
+
+(** The defender cannot make the initial bid - that honor belongs to the attacker. *)
+Lemma defender_cannot_initial_bid : forall chal resp bid phase',
+  bid_side bid = Defender ->
+  ~ BatchallStep (PhaseResponded chal resp) (ActBid bid) phase'.
+Proof.
+  intros chal resp bid phase' Hside H.
+  inversion H; subst. congruence.
+Qed.
+
+(** A defender bid must reduce the defender's metrics. *)
+Lemma defender_bid_reduces_def : forall chal resp atk def hist ready new_bid phase',
+  bid_side new_bid = Defender ->
+  BatchallStep (PhaseBidding chal resp atk def hist ready) (ActBid new_bid) phase' ->
+  fm_lt (bid_metrics new_bid) (bid_metrics def).
+Proof.
+  intros chal resp atk def hist ready new_bid phase' Hnew Hstep.
+  inversion Hstep; subst.
+  - congruence.
+  - auto.
+Qed.
+
+(** ** Summary of Negative Properties
+
+    The above lemmas establish that the batchall state machine rejects:
+    - Out-of-order actions (responding before challenge, bidding before response)
+    - Invalid bid directions (bidding higher instead of lower)
+    - Premature closure (closing without both sides ready)
+    - Double actions (passing twice, challenging twice)
+    - Wrong-side actions (defender making initial bid)
+
+    Together with the positive properties (determinism, progress, termination),
+    these negative examples give us confidence that the formalization
+    accurately captures the batchall ritual. *)
 
 (** ** The Bidding Measure
 
