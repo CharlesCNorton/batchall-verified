@@ -284,13 +284,61 @@ Qed.
 
 (** * Section 8: Stakes and Locations *)
 
+Inductive TrialType : Type :=
+  | TrialOfPosition
+  | TrialOfPossession
+  | TrialOfRefusal
+  | TrialOfGrievance
+  | TrialOfBloodright
+  | TrialOfAbjuration
+  | TrialOfAnnihilation.
+
+Definition trial_type_eq_dec : forall (t1 t2 : TrialType), {t1 = t2} + {t1 <> t2}.
+Proof. decide equality. Defined.
+
+Definition trial_severity (t : TrialType) : nat :=
+  match t with
+  | TrialOfPosition => 1
+  | TrialOfPossession => 2
+  | TrialOfRefusal => 2
+  | TrialOfGrievance => 1
+  | TrialOfBloodright => 3
+  | TrialOfAbjuration => 4
+  | TrialOfAnnihilation => 5
+  end.
+
+Definition trial_requires_circle_of_equals (t : TrialType) : bool :=
+  match t with
+  | TrialOfBloodright => true
+  | TrialOfAnnihilation => true
+  | _ => false
+  end.
+
+Definition trial_is_lethal (t : TrialType) : bool :=
+  match t with
+  | TrialOfAnnihilation => true
+  | _ => false
+  end.
+
+Lemma trial_severity_positive : forall t,
+  trial_severity t >= 1.
+Proof.
+  intros t. destruct t; simpl; lia.
+Qed.
+
+Lemma annihilation_most_severe : forall t,
+  trial_severity t <= trial_severity TrialOfAnnihilation.
+Proof.
+  intros t. destruct t; simpl; lia.
+Qed.
+
 Inductive Prize : Type :=
   | PrizeWorld (world_id : nat)
   | PrizeEnclave (enclave_id : nat)
   | PrizeFacility (facility_id : nat)
   | PrizeBloodright (bloodname : nat)
   | PrizeHonor
-  | PrizeTrial (trial_type : nat).
+  | PrizeTrial (trial : TrialType).
 
 Inductive Location : Type :=
   | LocPlanetSurface (world_id : nat) (region_id : nat)
@@ -303,6 +351,98 @@ Record Stakes : Type := mkStakes {
   stakes_defender_prize : option Prize;
   stakes_hegira_allowed : bool
 }.
+
+(** * Section 8b: Zellbrigen - The Honor Code of Single Combat *)
+
+Inductive ZellbrigenStatus : Type :=
+  | ZellActive
+  | ZellBroken (violator : nat)
+  | ZellSuspended
+  | ZellNotApplicable.
+
+Record ZellbrigenRules : Type := mkZellbrigenRules {
+  zell_one_on_one : bool;
+  zell_no_physical_attacks : bool;
+  zell_declare_targets : bool;
+  zell_respect_ejections : bool
+}.
+
+Definition strict_zellbrigen : ZellbrigenRules :=
+  mkZellbrigenRules true true true true.
+
+Definition relaxed_zellbrigen : ZellbrigenRules :=
+  mkZellbrigenRules true false false true.
+
+Inductive ZellbrigenViolation : Type :=
+  | ViolGangUp
+  | ViolPhysicalAttack
+  | ViolUndeclaredTarget
+  | ViolAttackEjected
+  | ViolOther (code : nat).
+
+Definition zell_violation_severity (v : ZellbrigenViolation) : nat :=
+  match v with
+  | ViolGangUp => 3
+  | ViolPhysicalAttack => 1
+  | ViolUndeclaredTarget => 2
+  | ViolAttackEjected => 5
+  | ViolOther _ => 1
+  end.
+
+Lemma zell_violation_severity_positive : forall v,
+  zell_violation_severity v >= 1.
+Proof.
+  intros v. destruct v; simpl; lia.
+Qed.
+
+(** * Section 8c: Safcon - Safe Conduct Protocol *)
+
+Inductive SafconStatus : Type :=
+  | SafconGranted
+  | SafconDenied
+  | SafconViolated (by_side : nat)
+  | SafconExpired
+  | SafconNotRequested.
+
+Record SafconTerms : Type := mkSafconTerms {
+  safcon_granted : bool;
+  safcon_jumpship_protected : bool;
+  safcon_dropship_protected : bool;
+  safcon_duration_hours : nat;
+  safcon_granting_clan : Clan
+}.
+
+Definition default_safcon (grantor : Clan) : SafconTerms :=
+  mkSafconTerms true true true 72 grantor.
+
+Definition safcon_active (s : SafconTerms) : bool :=
+  safcon_granted s && negb (Nat.eqb (safcon_duration_hours s) 0).
+
+Lemma safcon_default_active : forall c,
+  safcon_active (default_safcon c) = true.
+Proof.
+  intros c. unfold safcon_active, default_safcon. simpl. reflexivity.
+Qed.
+
+Inductive SafconViolationType : Type :=
+  | SafconAttackJumpship
+  | SafconAttackDropship
+  | SafconAttackInTransit
+  | SafconDenyLanding.
+
+Definition safcon_violation_dishonor (v : SafconViolationType) : nat :=
+  match v with
+  | SafconAttackJumpship => 10
+  | SafconAttackDropship => 5
+  | SafconAttackInTransit => 8
+  | SafconDenyLanding => 3
+  end.
+
+Lemma safcon_violation_always_dishonorable : forall v,
+  safcon_violation_dishonor v >= 3.
+Proof.
+  intros v. destruct v; simpl; lia.
+Qed.
 
 (** * Section 9: Bids *)
 
@@ -599,12 +739,56 @@ Record HonorLedger : Type := mkHonorLedger {
   ledger_honor : Commander -> Honor
 }.
 
+Definition refusal_honor_delta (reason : RefusalReason) : Honor :=
+  match reason with
+  | RefusalDishonorableConduct => 2
+  | RefusalNoJurisdiction => 0
+  | RefusalInvalidChallenger => 1
+  | RefusalAlreadyContested => 0
+  | RefusalOther _ => -1
+  end.
+
+Lemma refusal_dishonorable_gives_honor :
+  refusal_honor_delta RefusalDishonorableConduct = 2%Z.
+Proof. reflexivity. Qed.
+
+Lemma refusal_other_loses_honor : forall code,
+  refusal_honor_delta (RefusalOther code) = (-1)%Z.
+Proof. reflexivity. Qed.
+
+Inductive HegiraAction : Type :=
+  | HegiraRequest
+  | HegiraGrant
+  | HegiraDeny
+  | HegiraAccept
+  | HegiraViolate.
+
+Definition hegira_honor_delta (h : HegiraAction) : Honor :=
+  match h with
+  | HegiraRequest => 0
+  | HegiraGrant => 3
+  | HegiraDeny => -2
+  | HegiraAccept => 1
+  | HegiraViolate => -15
+  end.
+
+Lemma hegira_grant_honorable :
+  (hegira_honor_delta HegiraGrant > 0)%Z.
+Proof. simpl. lia. Qed.
+
+Lemma hegira_deny_dishonorable :
+  (hegira_honor_delta HegiraDeny < 0)%Z.
+Proof. simpl. lia. Qed.
+
+Lemma hegira_violate_severely_dishonorable :
+  (hegira_honor_delta HegiraViolate <= -10)%Z.
+Proof. simpl. lia. Qed.
+
 Definition honor_delta (action : ProtocolAction) (actor : Commander) : Honor :=
   match action with
   | ActChallenge _ => 1
   | ActRespond _ => 1
-  | ActRefuse RefusalDishonorableConduct => 0
-  | ActRefuse _ => -1
+  | ActRefuse reason => refusal_honor_delta reason
   | ActBid _ => 0
   | ActPass _ => 0
   | ActClose => 1
@@ -672,6 +856,89 @@ Inductive InternalStep : InternalPhase -> InternalAction -> InternalPhase -> Pro
       InternalStep (IPhaseBidding cands current hist)
                    IActConcede
                    (IPhaseComplete current).
+
+(** * Section 20b: Concurrent Internal Bidding - Galaxy-Level Cutdowns *)
+
+Record ConcurrentBid : Type := mkConcurrentBid {
+  cbid_candidate : InternalCandidate;
+  cbid_timestamp : nat;
+  cbid_priority : nat
+}.
+
+Definition cbid_metrics (cb : ConcurrentBid) : ForceMetrics :=
+  icand_metrics (cbid_candidate cb).
+
+Definition cbid_better (cb1 cb2 : ConcurrentBid) : Prop :=
+  fm_lt (cbid_metrics cb1) (cbid_metrics cb2) \/
+  (cbid_metrics cb1 = cbid_metrics cb2 /\ cbid_priority cb1 < cbid_priority cb2).
+
+Inductive ConcurrentPhase : Type :=
+  | CPhaseCollecting (deadline : nat) (bids : list ConcurrentBid)
+  | CPhaseResolving (bids : list ConcurrentBid)
+  | CPhaseResolved (winner : ConcurrentBid).
+
+Definition find_best_bid (bids : list ConcurrentBid) : option ConcurrentBid :=
+  match bids with
+  | [] => None
+  | b :: rest =>
+      Some (fold_left (fun acc cb =>
+        if fm_le_dec (cbid_metrics cb) (cbid_metrics acc)
+        then (if fm_le_dec (cbid_metrics acc) (cbid_metrics cb)
+              then (if cbid_priority cb <? cbid_priority acc then cb else acc)
+              else cb)
+        else acc) rest b)
+  end.
+
+Inductive ConcurrentAction : Type :=
+  | CActSubmit (bid : ConcurrentBid)
+  | CActDeadline
+  | CActResolve.
+
+Inductive ConcurrentStep : ConcurrentPhase -> ConcurrentAction -> ConcurrentPhase -> Prop :=
+  | CStepSubmit : forall deadline bids new_bid,
+      ConcurrentStep (CPhaseCollecting deadline bids)
+                     (CActSubmit new_bid)
+                     (CPhaseCollecting deadline (new_bid :: bids))
+
+  | CStepDeadline : forall deadline bids,
+      bids <> [] ->
+      ConcurrentStep (CPhaseCollecting deadline bids)
+                     CActDeadline
+                     (CPhaseResolving bids)
+
+  | CStepResolve : forall bids winner,
+      find_best_bid bids = Some winner ->
+      ConcurrentStep (CPhaseResolving bids)
+                     CActResolve
+                     (CPhaseResolved winner).
+
+Lemma concurrent_submission_preserves_bids : forall deadline bids new_bid bids',
+  ConcurrentStep (CPhaseCollecting deadline bids) (CActSubmit new_bid) (CPhaseCollecting deadline bids') ->
+  In new_bid bids'.
+Proof.
+  intros deadline bids new_bid bids' Hstep.
+  inversion Hstep; subst. simpl. left. reflexivity.
+Qed.
+
+Lemma find_best_bid_in_list : forall bids winner,
+  find_best_bid bids = Some winner ->
+  In winner bids.
+Proof.
+  intros bids winner Hfind.
+  destruct bids as [|b rest].
+  - simpl in Hfind. discriminate.
+  - simpl in Hfind. injection Hfind as Heq.
+    revert b Heq. induction rest as [|b' rest' IH]; intros b Heq.
+    + simpl in Heq. subst. left. reflexivity.
+    + simpl in Heq.
+      destruct (fm_le_dec (cbid_metrics b') (cbid_metrics b)).
+      * destruct (fm_le_dec (cbid_metrics b) (cbid_metrics b')).
+        { destruct (cbid_priority b' <? cbid_priority b) eqn:Hprio.
+          - specialize (IH b' Heq). destruct IH; [right; left; auto | right; right; auto].
+          - specialize (IH b Heq). destruct IH; [left; auto | right; right; auto]. }
+        { specialize (IH b' Heq). destruct IH; [right; left; auto | right; right; auto]. }
+      * specialize (IH b Heq). destruct IH; [left; auto | right; right; auto].
+Qed.
 
 (** * Section 21: Composite System - External + Internal *)
 
