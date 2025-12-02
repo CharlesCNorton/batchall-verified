@@ -1148,6 +1148,81 @@ Inductive ConcurrentStep : ConcurrentPhase -> ConcurrentAction -> ConcurrentPhas
                      CActResolve
                      (CPhaseResolved winner).
 
+(** ** Section 8.4: find_best_bid Correctness *)
+
+Lemma find_best_bid_nonempty : forall bids,
+  bids <> [] -> exists winner, find_best_bid bids = Some winner.
+Proof.
+  intros bids Hne.
+  destruct bids as [|b rest].
+  - contradiction.
+  - simpl. eexists. reflexivity.
+Qed.
+
+Definition cbid_select (acc cb : ConcurrentBid) : ConcurrentBid :=
+  if fm_le_dec (cbid_metrics cb) (cbid_metrics acc)
+  then (if fm_le_dec (cbid_metrics acc) (cbid_metrics cb)
+        then (if cbid_priority cb <? cbid_priority acc then cb else acc)
+        else cb)
+  else acc.
+
+Lemma cbid_select_In_pair : forall a b,
+  cbid_select a b = a \/ cbid_select a b = b.
+Proof.
+  intros a b. unfold cbid_select.
+  destruct (fm_le_dec (cbid_metrics b) (cbid_metrics a)).
+  - destruct (fm_le_dec (cbid_metrics a) (cbid_metrics b)).
+    + destruct (cbid_priority b <? cbid_priority a); auto.
+    + auto.
+  - auto.
+Qed.
+
+Lemma fold_left_In_init_or_rest : forall (l : list ConcurrentBid) (init : ConcurrentBid),
+  fold_left cbid_select l init = init \/ In (fold_left cbid_select l init) l.
+Proof.
+  induction l as [|x rest IH]; intros init.
+  - simpl. left. reflexivity.
+  - simpl. specialize (IH (cbid_select init x)).
+    destruct IH as [Heq | Hin].
+    + destruct (cbid_select_In_pair init x) as [Heq' | Heq'].
+      * left. rewrite Heq. exact Heq'.
+      * right. left. rewrite Heq. rewrite Heq'. reflexivity.
+    + right. right. exact Hin.
+Qed.
+
+Lemma fold_left_In_invariant : forall (l : list ConcurrentBid) (init : ConcurrentBid),
+  In (fold_left cbid_select l init) (init :: l).
+Proof.
+  intros l init.
+  destruct (fold_left_In_init_or_rest l init) as [Heq | Hin].
+  - rewrite Heq. left. reflexivity.
+  - right. exact Hin.
+Qed.
+
+Lemma find_best_bid_eq_fold : forall b rest,
+  find_best_bid (b :: rest) = Some (fold_left cbid_select rest b).
+Proof.
+  intros b rest. simpl. f_equal.
+Qed.
+
+Lemma find_best_bid_In : forall bids winner,
+  find_best_bid bids = Some winner -> In winner bids.
+Proof.
+  intros bids winner Hfind.
+  destruct bids as [|b rest].
+  - simpl in Hfind. discriminate.
+  - rewrite find_best_bid_eq_fold in Hfind.
+    inversion Hfind as [Heq]. subst winner. clear Hfind.
+    apply fold_left_In_invariant.
+Qed.
+
+Theorem find_best_bid_correct : forall bids winner,
+  find_best_bid bids = Some winner -> In winner bids.
+Proof.
+  intros bids winner Hfind.
+  apply find_best_bid_In. exact Hfind.
+Qed.
+
 (** * Part IX: Termination and Soundness Proofs *)
 
 (** ** Section 9.1: Terminal States are Final *)
@@ -1285,6 +1360,73 @@ Proof.
   - lia.
 Qed.
 
+(** ** Section 9.9: Progress Properties (Liveness)
+
+    We prove that from any non-terminal state, at least one action is possible.
+    This is the dual of safety (termination) - it ensures the protocol doesn't
+    get stuck in a non-terminal state. *)
+
+Theorem idle_has_progress : forall (chal : BatchallChallenge),
+  exists phase', BatchallStep PhaseIdle (ActChallenge chal) phase'.
+Proof.
+  intros chal.
+  exists (PhaseChallenged chal).
+  constructor.
+Qed.
+
+Theorem challenged_has_progress : forall chal,
+  (exists resp phase', BatchallStep (PhaseChallenged chal) (ActRespond resp) phase') /\
+  (exists reason phase', BatchallStep (PhaseChallenged chal) (ActRefuse reason) phase').
+Proof.
+  intros chal. split.
+  - exists (mkBatchallResponse (mkCommander 0 ClanWolf Warrior false) (LocEnclave 0) [] None).
+    eexists. constructor.
+  - exists RefusalNoJurisdiction. eexists. constructor.
+Qed.
+
+Theorem responded_has_progress : forall chal resp,
+  exists action phase', BatchallStep (PhaseResponded chal resp) action phase'.
+Proof.
+  intros chal resp.
+  set (atk_bid := mkForceBid Attacker (chal_initial_force chal) (chal_challenger chal)).
+  exists (ActBid atk_bid).
+  eexists. constructor.
+Qed.
+
+Theorem bidding_has_progress : forall chal resp atk def hist ready,
+  exists action phase', BatchallStep (PhaseBidding chal resp atk def hist ready) action phase'.
+Proof.
+  intros chal resp atk def hist ready.
+  destruct ready.
+  - exists (ActPass Attacker). eexists. constructor.
+  - exists (ActPass Defender). eexists. constructor.
+  - exists (ActPass Attacker). eexists. constructor.
+  - exists (ActWithdraw Attacker). eexists. constructor.
+Qed.
+
+Definition can_progress (phase : BatchallPhase) : Prop :=
+  exists action phase', BatchallStep phase action phase'.
+
+Theorem non_terminal_can_progress : forall phase,
+  ~ is_terminal phase -> can_progress phase.
+Proof.
+  intros phase Hnterm.
+  unfold can_progress.
+  destruct phase as [| chal | chal resp | chal resp atk def hist ready | | |].
+  - destruct (idle_has_progress (mkBatchallChallenge
+        (mkCommander 0 ClanWolf StarCaptain false) PrizeHonor [])) as [phase' H].
+    eexists. eexists. exact H.
+  - destruct (challenged_has_progress chal) as [[r [phase' H]] _].
+    eexists. eexists. exact H.
+  - destruct (responded_has_progress chal resp) as [action [phase' H]].
+    eexists. eexists. exact H.
+  - destruct (bidding_has_progress chal resp atk def hist ready) as [action [phase' H]].
+    eexists. eexists. exact H.
+  - simpl in Hnterm. contradiction.
+  - simpl in Hnterm. contradiction.
+  - simpl in Hnterm. contradiction.
+Qed.
+
 (** * Part X: Main Theorems and Examples *)
 
 (** ** Section 10.1: Battle Outcomes *)
@@ -1322,28 +1464,70 @@ Definition HonorableConclusion (outcome : BattleOutcome) : Prop :=
   | _ => False
   end.
 
-(** ** Section 10.3: Example - Honorable Batchall Is Possible *)
+(** ** Section 10.3: Example Units and Forces *)
+
+Definition example_timberwolf : Unit :=
+  mkUnit 1 OmniMech Heavy 75 3 true true.
+
+Definition example_madcat : Unit :=
+  mkUnit 2 OmniMech Heavy 75 2 true true.
+
+Definition example_daishi : Unit :=
+  mkUnit 3 OmniMech Assault 100 3 true true.
+
+Definition example_summoner : Unit :=
+  mkUnit 4 OmniMech Heavy 70 4 false true.
+
+Definition example_elemental_point : Unit :=
+  mkUnit 5 Elemental Light 5 2 true true.
+
+Definition wolf_star : Force :=
+  [example_timberwolf; example_madcat; example_summoner;
+   example_summoner; example_elemental_point].
+
+Definition falcon_binary : Force :=
+  [example_daishi; example_daishi; example_timberwolf;
+   example_madcat; example_summoner; example_summoner;
+   example_elemental_point; example_elemental_point].
+
+Lemma wolf_star_nonempty : wolf_star <> [].
+Proof. unfold wolf_star. discriminate. Qed.
+
+Lemma falcon_binary_nonempty : falcon_binary <> [].
+Proof. unfold falcon_binary. discriminate. Qed.
+
+Lemma wolf_star_metrics : force_metrics wolf_star = mkForceMetrics 5 295 3 5.
+Proof. reflexivity. Qed.
+
+Lemma falcon_binary_metrics : force_metrics falcon_binary = mkForceMetrics 8 500 6 8.
+Proof. reflexivity. Qed.
+
+(** ** Section 10.4: Example - Honorable Batchall Is Possible *)
 
 Theorem honorable_batchall_possible :
   exists chal resp,
+    chal_initial_force chal <> [] /\
+    resp_force resp <> [] /\
     BatchallStep PhaseIdle (ActChallenge chal) (PhaseChallenged chal) /\
     BatchallStep (PhaseChallenged chal) (ActRespond resp) (PhaseResponded chal resp).
 Proof.
   exists (mkBatchallChallenge
             (mkCommander 0 ClanWolf StarColonel true)
             (PrizeEnclave 1)
-            []).
+            wolf_star).
   exists (mkBatchallResponse
             (mkCommander 1 ClanJadeFalcon StarCaptain true)
             (LocEnclave 1)
-            []
+            falcon_binary
             None).
-  split.
+  repeat split.
+  - exact wolf_star_nonempty.
+  - exact falcon_binary_nonempty.
   - constructor.
   - constructor.
 Qed.
 
-(** ** Section 10.4: Sublist Relation for Force Composition *)
+(** ** Section 10.5: Sublist Relation for Force Composition *)
 
 Inductive Sublist {A : Type} : list A -> list A -> Prop :=
   | SublistNil : forall l, Sublist [] l
@@ -1369,7 +1553,7 @@ Proof.
     split; [lia|]. split; [lia|]. split; lia.
 Qed.
 
-(** ** Section 10.5: Internal Respects External *)
+(** ** Section 10.6: Internal Respects External *)
 
 Definition force_sublist (f1 f2 : Force) : Prop := Sublist f1 f2.
 
@@ -1384,7 +1568,7 @@ Proof.
   apply sublist_metrics_le. exact Hsub.
 Qed.
 
-(** ** Section 10.6: Valid Bidding State Invariant *)
+(** ** Section 10.7: Valid Bidding State Invariant *)
 
 Definition valid_bidding_state (chal : BatchallChallenge) (resp : BatchallResponse)
                                (atk_bid def_bid : ForceBid) (hist : list ForceBid) : Prop :=
@@ -1411,4 +1595,176 @@ Proof.
   | [ H : _ /\ _ |- _ ] => destruct H as [[? [? [? ?]]] ?]
   end;
   repeat split; lia.
+Qed.
+
+(** ** Section 10.8: Honor Integration with Protocol Traces *)
+
+Open Scope Z_scope.
+
+Definition action_actor (action : ProtocolAction) : option Commander :=
+  match action with
+  | ActChallenge chal => Some (chal_challenger chal)
+  | ActRespond resp => Some (resp_defender resp)
+  | ActBid bid => Some (bid_commander bid)
+  | _ => None
+  end.
+
+Definition step_honor_delta (action : ProtocolAction) : Honor :=
+  protocol_honor_delta action.
+
+Fixpoint trace_honor_sum {phase : BatchallPhase} (t : BatchallTrace phase) : Honor :=
+  match t with
+  | TraceNil _ => 0
+  | @TraceCons _ action _ _ rest => step_honor_delta action + trace_honor_sum rest
+  end.
+
+Definition initial_ledger : HonorLedger :=
+  mkHonorLedger (fun _ => 0).
+
+Fixpoint apply_trace_honor {phase : BatchallPhase} (ledger : HonorLedger)
+    (t : BatchallTrace phase) (default_actor : Commander) : HonorLedger :=
+  match t with
+  | TraceNil _ => ledger
+  | @TraceCons _ action _ _ rest =>
+      let actor := match action_actor action with
+                   | Some c => c
+                   | None => default_actor
+                   end in
+      let new_ledger := update_honor ledger actor (step_honor_delta action) in
+      apply_trace_honor new_ledger rest default_actor
+  end.
+
+Lemma trace_honor_sum_nil : forall phase,
+  trace_honor_sum (TraceNil phase) = 0.
+Proof. reflexivity. Qed.
+
+Lemma trace_honor_sum_cons : forall phase1 action phase2 step rest,
+  trace_honor_sum (@TraceCons phase1 action phase2 step rest) =
+  step_honor_delta action + trace_honor_sum rest.
+Proof. reflexivity. Qed.
+
+Lemma challenge_honor_positive : forall chal,
+  step_honor_delta (ActChallenge chal) = 1.
+Proof. reflexivity. Qed.
+
+Lemma respond_honor_positive : forall resp,
+  step_honor_delta (ActRespond resp) = 1.
+Proof. reflexivity. Qed.
+
+Lemma withdraw_honor_negative : forall side,
+  step_honor_delta (ActWithdraw side) = -2.
+Proof. reflexivity. Qed.
+
+Lemma break_bid_severely_negative :
+  step_honor_delta ActBreakBid = -10.
+Proof. reflexivity. Qed.
+
+Theorem honorable_conclusion_positive_trace : forall chal resp,
+  let t := TraceCons (StepChallenge chal)
+           (TraceCons (StepRespond chal resp)
+           (TraceNil (PhaseResponded chal resp))) in
+  trace_honor_sum t = 2.
+Proof.
+  intros chal resp. simpl. reflexivity.
+Qed.
+
+Close Scope Z_scope.
+
+(** ** Section 10.9: Internal-External Bidding Integration *)
+
+Record FullBatchallResult : Type := mkFullBatchallResult {
+  fbr_external : ExternalResult;
+  fbr_attacker_internal : option InternalResult;
+  fbr_defender_internal : option InternalResult
+}.
+
+Definition attacker_final_force (result : FullBatchallResult) : Force :=
+  match fbr_attacker_internal result with
+  | Some int_res => icand_force (int_winner int_res)
+  | None => bid_force (ext_attacker_bid (fbr_external result))
+  end.
+
+Definition defender_final_force (result : FullBatchallResult) : Force :=
+  match fbr_defender_internal result with
+  | Some int_res => icand_force (int_winner int_res)
+  | None => bid_force (ext_defender_bid (fbr_external result))
+  end.
+
+Definition internal_result_valid (int_res : InternalResult) (max_force : Force) : Prop :=
+  Sublist (icand_force (int_winner int_res)) max_force.
+
+Definition full_result_valid (result : FullBatchallResult) : Prop :=
+  (forall int_res, fbr_attacker_internal result = Some int_res ->
+    internal_result_valid int_res (bid_force (ext_attacker_bid (fbr_external result)))) /\
+  (forall int_res, fbr_defender_internal result = Some int_res ->
+    internal_result_valid int_res (bid_force (ext_defender_bid (fbr_external result)))).
+
+Theorem full_result_forces_bounded : forall result,
+  full_result_valid result ->
+  fm_le (force_metrics (attacker_final_force result))
+        (bid_metrics (ext_attacker_bid (fbr_external result))) /\
+  fm_le (force_metrics (defender_final_force result))
+        (bid_metrics (ext_defender_bid (fbr_external result))).
+Proof.
+  intros result [Hatk Hdef].
+  split.
+  - unfold attacker_final_force.
+    destruct (fbr_attacker_internal result) as [int_res|] eqn:Heq.
+    + specialize (Hatk int_res eq_refl).
+      unfold internal_result_valid in Hatk.
+      apply sublist_metrics_le. exact Hatk.
+    + unfold bid_metrics. apply fm_le_refl.
+  - unfold defender_final_force.
+    destruct (fbr_defender_internal result) as [int_res|] eqn:Heq.
+    + specialize (Hdef int_res eq_refl).
+      unfold internal_result_valid in Hdef.
+      apply sublist_metrics_le. exact Hdef.
+    + unfold bid_metrics. apply fm_le_refl.
+Qed.
+
+(** ** Section 10.10: Sublist Connection to Bidding *)
+
+Definition bid_reduces_force (bid1 bid2 : ForceBid) : Prop :=
+  bid_side bid1 = bid_side bid2 /\
+  Sublist (bid_force bid1) (bid_force bid2).
+
+Lemma bid_reduces_implies_metrics_le : forall bid1 bid2,
+  bid_reduces_force bid1 bid2 ->
+  fm_le (bid_metrics bid1) (bid_metrics bid2).
+Proof.
+  intros bid1 bid2 [Hside Hsub].
+  unfold bid_metrics.
+  apply sublist_metrics_le. exact Hsub.
+Qed.
+
+Lemma sublist_refl : forall {A : Type} (l : list A), Sublist l l.
+Proof.
+  induction l as [|x rest IH].
+  - constructor.
+  - apply SublistTake. exact IH.
+Qed.
+
+Lemma sublist_trans : forall {A : Type} (l1 l2 l3 : list A),
+  Sublist l1 l2 -> Sublist l2 l3 -> Sublist l1 l3.
+Proof.
+  intros A l1 l2 l3 H12 H23.
+  revert l1 H12.
+  induction H23 as [l | x l2' l3' H23 IH | x l2' l3' H23 IH]; intros l1 H12.
+  - apply sublist_nil in H12. subst. constructor.
+  - apply SublistSkip. apply IH. exact H12.
+  - inversion H12; subst.
+    + constructor.
+    + apply SublistSkip. apply IH. exact H1.
+    + apply SublistTake. apply IH. exact H1.
+Qed.
+
+Theorem bid_chain_valid : forall b1 b2 b3,
+  bid_reduces_force b1 b2 ->
+  bid_reduces_force b2 b3 ->
+  bid_reduces_force b1 b3.
+Proof.
+  intros b1 b2 b3 [Hs12 Hsub12] [Hs23 Hsub23].
+  split.
+  - congruence.
+  - apply sublist_trans with (l2 := bid_force b2); assumption.
 Qed.
