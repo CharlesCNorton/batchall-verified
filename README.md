@@ -3,10 +3,10 @@
                     ║                                                               ║
                     ║  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓  ║
                     ║  ┃                                                         ┃  ║
-                    ║  ┃   ░▒▓█  THE BATCHALL  █▓▒░                              ┃  ║
-                    ║  ┃         ═══════════                                     ┃  ║
+                    ║  ┃                ░▒▓█  THE BATCHALL  █▓▒░                 ┃  ║
+                    ║  ┃                      ═══════════                        ┃  ║
                     ║  ┃                                                         ┃  ║
-                    ║  ┃       A   F O R M A L   V E R I F I C A T I O N         ┃  ║
+                    ║  ┃        A   F O R M A L   V E R I F I C A T I O N        ┃  ║
                     ║  ┃                                                         ┃  ║
                     ║  ┃              ◆  IN THE COQ PROOF ASSISTANT  ◆          ┃  ║
                     ║  ┃                                                         ┃  ║
