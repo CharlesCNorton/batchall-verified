@@ -499,6 +499,12 @@ Definition weight_to_nat (w : WeightClass) : nat :=
   | SuperHeavy => 5
   end.
 
+Definition unit_class_eq_dec : forall c1 c2 : UnitClass, {c1 = c2} + {c1 <> c2}.
+Proof. decide equality. Defined.
+
+Definition weight_class_eq_dec : forall w1 w2 : WeightClass, {w1 = w2} + {w1 <> w2}.
+Proof. decide equality. Defined.
+
 (** * Units and Warrior Skills
 
     A Unit represents a single combat asset: one BattleMech, one fighter,
@@ -556,6 +562,22 @@ Record Unit : Type := mkUnit {
 (** Combined skill rating for comparison. *)
 Definition unit_skill (u : Unit) : nat :=
   unit_gunnery u + unit_piloting u.
+
+(** Decidable equality for units - needed for count-based SubForce. *)
+Definition unit_eq_dec : forall u1 u2 : Unit, {u1 = u2} + {u1 <> u2}.
+Proof.
+  intros [id1 c1 w1 t1 g1 p1 e1 cl1] [id2 c2 w2 t2 g2 p2 e2 cl2].
+  destruct (Nat.eq_dec id1 id2);
+  destruct (unit_class_eq_dec c1 c2);
+  destruct (weight_class_eq_dec w1 w2);
+  destruct (Nat.eq_dec t1 t2);
+  destruct (Nat.eq_dec g1 g2);
+  destruct (Nat.eq_dec p1 p2);
+  destruct (Bool.bool_dec e1 e2);
+  destruct (Bool.bool_dec cl1 cl2);
+  try (left; congruence);
+  try (right; congruence).
+Defined.
 
 (** * The Kerensky Combat Rating - The Clan Measure of Force
 
@@ -1237,22 +1259,48 @@ Qed.
     actual Clan bidding: "I bid away my Elementals" can mean removing
     them from wherever they appear in the force roster.
 
-    Mathematically, f1 is a SubForce of f2 if every unit in f1 is
-    also in f2. *)
+    Mathematically, f1 is a SubForce of f2 if for every unit type,
+    f1 contains at most as many copies as f2. This is proper multiset
+    inclusion, handling forces with duplicate units correctly.
+
+    The old definition using In was incorrect for forces with duplicates:
+    [u;u] would be a "subforce" of [u] because In u [u;u] -> In u [u].
+    The count-based definition fixes this. *)
 
 Definition SubForce (f1 f2 : Force) : Prop :=
-  forall u, In u f1 -> In u f2.
+  forall u, count_occ unit_eq_dec f1 u <= count_occ unit_eq_dec f2 u.
+
+(** Helper: Sublist implies count is less or equal. *)
+Lemma sublist_count_le : forall (A : Type) (eq_dec : forall x y : A, {x = y} + {x <> y})
+                                 (l1 l2 : list A),
+  Sublist l1 l2 -> forall a, count_occ eq_dec l1 a <= count_occ eq_dec l2 a.
+Proof.
+  intros A eq_dec l1 l2 Hsub.
+  induction Hsub as [l | x l1 l2 Hsub IH | x l1 l2 Hsub IH]; intros a.
+  - simpl. lia.
+  - simpl. specialize (IH a). destruct (eq_dec x a); lia.
+  - simpl. specialize (IH a). destruct (eq_dec x a); lia.
+Qed.
 
 Lemma sublist_implies_subforce : forall f1 f2,
   Sublist f1 f2 -> SubForce f1 f2.
 Proof.
-  intros f1 f2 H.
-  induction H as [l | x l1 l2 Hsub IH | x l1 l2 Hsub IH].
-  - unfold SubForce. intros u Hin. inversion Hin.
-  - unfold SubForce in *. intros u Hin. right. apply IH. exact Hin.
-  - unfold SubForce in *. intros u Hin. destruct Hin as [Heq | Hin'].
-    + left. exact Heq.
-    + right. apply IH. exact Hin'.
+  intros f1 f2 Hsub. unfold SubForce.
+  intros u. apply sublist_count_le. exact Hsub.
+Qed.
+
+(** SubForce is reflexive. *)
+Lemma subforce_refl : forall f, SubForce f f.
+Proof.
+  intros f u. lia.
+Qed.
+
+(** SubForce is transitive. *)
+Lemma subforce_trans : forall f1 f2 f3,
+  SubForce f1 f2 -> SubForce f2 f3 -> SubForce f1 f3.
+Proof.
+  intros f1 f2 f3 H12 H23 u.
+  specialize (H12 u). specialize (H23 u). lia.
 Qed.
 
 (** ** Minimum Viable Force
@@ -1944,12 +1992,16 @@ Record BattleContext : Type := mkBattleContext {
 Definition context_valid (ctx : BattleContext) : Prop :=
   (trial_is_lethal (ctx_trial ctx) = true -> ctx_hegira_allowed ctx = false) /\
   (trial_requires_circle (ctx_trial ctx) = true -> ctx_circle_present ctx = true) /\
-  (safcon_active (ctx_safcon ctx) = true -> True).
+  (safcon_active (ctx_safcon ctx) = true ->
+     safcon_jumpship_protected (ctx_safcon ctx) = true \/
+     safcon_dropship_protected (ctx_safcon ctx) = true).
 
 Definition context_valid_b (ctx : BattleContext) : bool :=
   (negb (trial_is_lethal (ctx_trial ctx)) || negb (ctx_hegira_allowed ctx)) &&
   (negb (trial_requires_circle (ctx_trial ctx)) || ctx_circle_present ctx) &&
-  true.
+  (negb (safcon_active (ctx_safcon ctx)) ||
+     safcon_jumpship_protected (ctx_safcon ctx) ||
+     safcon_dropship_protected (ctx_safcon ctx)).
 
 Lemma context_valid_b_correct : forall ctx,
   context_valid_b ctx = true <-> context_valid ctx.
@@ -1957,16 +2009,23 @@ Proof.
   intros ctx. unfold context_valid_b, context_valid.
   split.
   - intros H.
-    apply andb_prop in H. destruct H as [H1 H2].
-    apply andb_prop in H1. destruct H1 as [H1a H1b].
-    repeat split; auto.
+    apply andb_prop in H. destruct H as [H12 H3].
+    apply andb_prop in H12. destruct H12 as [H1a H1b].
+    repeat split.
     + intros Hlethal.
       destruct (ctx_hegira_allowed ctx) eqn:Hheg; auto.
       rewrite Hlethal in H1a. simpl in H1a. discriminate.
     + intros Hcircle.
       destruct (ctx_circle_present ctx) eqn:Hpres; auto.
       rewrite Hcircle in H1b. simpl in H1b. discriminate.
-  - intros [H1 [H2 _]].
+    + intros Hsafcon.
+      rewrite Hsafcon in H3. simpl in H3.
+      destruct (safcon_jumpship_protected (ctx_safcon ctx)) eqn:Hjump.
+      * left. reflexivity.
+      * destruct (safcon_dropship_protected (ctx_safcon ctx)) eqn:Hdrop.
+        -- right. reflexivity.
+        -- simpl in H3. discriminate.
+  - intros [H1 [H2 H3]].
     apply andb_true_intro. split.
     + apply andb_true_intro. split.
       * destruct (trial_is_lethal (ctx_trial ctx)) eqn:Hlet.
@@ -1975,7 +2034,11 @@ Proof.
       * destruct (trial_requires_circle (ctx_trial ctx)) eqn:Hcirc.
         -- specialize (H2 eq_refl). rewrite H2. reflexivity.
         -- reflexivity.
-    + reflexivity.
+    + destruct (safcon_active (ctx_safcon ctx)) eqn:Hsaf.
+      * specialize (H3 eq_refl). destruct H3 as [Hjump | Hdrop].
+        -- rewrite Hjump. reflexivity.
+        -- rewrite Hdrop. destruct (safcon_jumpship_protected _); reflexivity.
+      * reflexivity.
 Qed.
 
 (** Key lemmas about context validity. *)
@@ -2010,8 +2073,11 @@ Definition standard_possession_context (grantor : Clan) : BattleContext :=
 Lemma standard_possession_valid : forall c,
   context_valid (standard_possession_context c).
 Proof.
-  intros c. unfold context_valid, standard_possession_context. simpl.
-  repeat split; intros; discriminate.
+  intros c. unfold context_valid, standard_possession_context, default_safcon. simpl.
+  repeat split; intros.
+  - discriminate.
+  - discriminate.
+  - left. reflexivity.
 Qed.
 
 (** Context for Trials of Annihilation - no mercy, no retreat. *)
@@ -3073,12 +3139,24 @@ Qed.
 
 (** ** The Phases *)
 
+(** Coalition storage for bidding phase. A side may be either a single
+    commander with a force (represented as None) or a multi-Clan coalition. *)
+Definition CoalitionState : Type := option Coalition.
+
+(** Extract the force from coalition state, with fallback to bid force. *)
+Definition coalition_state_force (cs : CoalitionState) (fallback : Force) : Force :=
+  match cs with
+  | None => fallback
+  | Some c => coalition_force c
+  end.
+
 Inductive BatchallPhase : Type :=
   | PhaseIdle
   | PhaseChallenged (challenge : BatchallChallenge)
   | PhaseResponded (challenge : BatchallChallenge) (response : BatchallResponse)
   | PhaseBidding (challenge : BatchallChallenge) (response : BatchallResponse)
                   (attacker_bid : ForceBid) (defender_bid : ForceBid)
+                  (attacker_coalition : CoalitionState) (defender_coalition : CoalitionState)
                   (bid_history : list ForceBid) (ready : ReadyStatus)
   | PhaseAgreed (challenge : BatchallChallenge) (response : BatchallResponse)
                  (final_attacker : ForceBid) (final_defender : ForceBid)
@@ -3097,7 +3175,7 @@ Definition is_terminal (phase : BatchallPhase) : bool :=
 
 Definition is_bidding (phase : BatchallPhase) : bool :=
   match phase with
-  | PhaseBidding _ _ _ _ _ _ => true
+  | PhaseBidding _ _ _ _ _ _ _ _ => true
   | _ => false
   end.
 
@@ -3139,22 +3217,22 @@ Inductive BatchallStep : BatchallPhase -> ProtocolAction -> BatchallPhase -> Pro
                    (ActBid bid)
                    (PhaseBidding chal resp bid
                      (mkForceBid (resp_force resp) Defender (resp_defender resp))
-                     [] NeitherReady)
+                     None None [] NeitherReady)
 
-  | StepBid : forall chal resp atk def hist ready new_bid,
+  | StepBid : forall chal resp atk def atk_coal def_coal hist ready new_bid,
       bid_side new_bid = Attacker ->
       fm_lt (bid_metrics new_bid) (bid_metrics atk) ->
-      BatchallStep (PhaseBidding chal resp atk def hist ready)
+      BatchallStep (PhaseBidding chal resp atk def atk_coal def_coal hist ready)
                    (ActBid new_bid)
-                   (PhaseBidding chal resp new_bid def (atk :: hist)
+                   (PhaseBidding chal resp new_bid def atk_coal def_coal (atk :: hist)
                      (clear_ready ready Attacker))
 
-  | StepBidDefender : forall chal resp atk def hist ready new_bid,
+  | StepBidDefender : forall chal resp atk def atk_coal def_coal hist ready new_bid,
       bid_side new_bid = Defender ->
       fm_lt (bid_metrics new_bid) (bid_metrics def) ->
-      BatchallStep (PhaseBidding chal resp atk def hist ready)
+      BatchallStep (PhaseBidding chal resp atk def atk_coal def_coal hist ready)
                    (ActBid new_bid)
-                   (PhaseBidding chal resp atk new_bid (def :: hist)
+                   (PhaseBidding chal resp atk new_bid atk_coal def_coal (def :: hist)
                      (clear_ready ready Defender))
 
   (** Coalition member bids allow individual members of a coalition to
@@ -3162,55 +3240,56 @@ Inductive BatchallStep : BatchallPhase -> ProtocolAction -> BatchallPhase -> Pro
       proceed - each Clan bids down its own contribution while the
       coalition's total force is tracked in the phase state.
 
-      The coalition bid must reduce the bidding member's metrics.
-      The new force bid becomes the coalition's combined force under
-      the lead commander's authority.
+      The coalition bid must reduce the bidding member's metrics AND
+      the coalition state must be present with a valid member index.
+      The coalition is updated using update_coalition_force. *)
 
-      Note: The new force comes directly from cmb_new_force in the bid,
-      ensuring determinism - the same cbid always produces the same result. *)
-
-  | StepCoalitionBidAttacker : forall chal resp atk def hist ready cbid,
+  | StepCoalitionBidAttacker : forall chal resp atk def coal def_coal hist ready cbid new_coal,
       cmb_side cbid = Attacker ->
-      fm_lt (force_metrics (cmb_new_force cbid)) (bid_metrics atk) ->
-      BatchallStep (PhaseBidding chal resp atk def hist ready)
+      cmb_member_index cbid < length coal ->
+      new_coal = update_coalition_force coal (cmb_member_index cbid) (cmb_new_force cbid) ->
+      fm_lt (force_metrics (coalition_force new_coal)) (bid_metrics atk) ->
+      BatchallStep (PhaseBidding chal resp atk def (Some coal) def_coal hist ready)
                    (ActCoalitionBid cbid)
                    (PhaseBidding chal resp
-                     (mkForceBid (cmb_new_force cbid) Attacker (bid_commander atk))
-                     def (atk :: hist) (clear_ready ready Attacker))
+                     (mkForceBid (coalition_force new_coal) Attacker (bid_commander atk))
+                     def (Some new_coal) def_coal (atk :: hist) (clear_ready ready Attacker))
 
-  | StepCoalitionBidDefender : forall chal resp atk def hist ready cbid,
+  | StepCoalitionBidDefender : forall chal resp atk def atk_coal coal hist ready cbid new_coal,
       cmb_side cbid = Defender ->
-      fm_lt (force_metrics (cmb_new_force cbid)) (bid_metrics def) ->
-      BatchallStep (PhaseBidding chal resp atk def hist ready)
+      cmb_member_index cbid < length coal ->
+      new_coal = update_coalition_force coal (cmb_member_index cbid) (cmb_new_force cbid) ->
+      fm_lt (force_metrics (coalition_force new_coal)) (bid_metrics def) ->
+      BatchallStep (PhaseBidding chal resp atk def atk_coal (Some coal) hist ready)
                    (ActCoalitionBid cbid)
                    (PhaseBidding chal resp atk
-                     (mkForceBid (cmb_new_force cbid) Defender (bid_commander def))
-                     (def :: hist) (clear_ready ready Defender))
+                     (mkForceBid (coalition_force new_coal) Defender (bid_commander def))
+                     atk_coal (Some new_coal) (def :: hist) (clear_ready ready Defender))
 
-  | StepPassAttacker : forall chal resp atk def hist ready,
+  | StepPassAttacker : forall chal resp atk def atk_coal def_coal hist ready,
       is_ready ready Attacker = false ->
-      BatchallStep (PhaseBidding chal resp atk def hist ready)
+      BatchallStep (PhaseBidding chal resp atk def atk_coal def_coal hist ready)
                    (ActPass Attacker)
-                   (PhaseBidding chal resp atk def hist (set_ready ready Attacker))
+                   (PhaseBidding chal resp atk def atk_coal def_coal hist (set_ready ready Attacker))
 
-  | StepPassDefender : forall chal resp atk def hist ready,
+  | StepPassDefender : forall chal resp atk def atk_coal def_coal hist ready,
       is_ready ready Defender = false ->
-      BatchallStep (PhaseBidding chal resp atk def hist ready)
+      BatchallStep (PhaseBidding chal resp atk def atk_coal def_coal hist ready)
                    (ActPass Defender)
-                   (PhaseBidding chal resp atk def hist (set_ready ready Defender))
+                   (PhaseBidding chal resp atk def atk_coal def_coal hist (set_ready ready Defender))
 
-  | StepClose : forall chal resp atk def hist,
-      BatchallStep (PhaseBidding chal resp atk def hist BothReady)
+  | StepClose : forall chal resp atk def atk_coal def_coal hist,
+      BatchallStep (PhaseBidding chal resp atk def atk_coal def_coal hist BothReady)
                    ActClose
                    (PhaseAgreed chal resp atk def)
 
-  | StepWithdraw : forall chal resp atk def hist ready side,
-      BatchallStep (PhaseBidding chal resp atk def hist ready)
+  | StepWithdraw : forall chal resp atk def atk_coal def_coal hist ready side,
+      BatchallStep (PhaseBidding chal resp atk def atk_coal def_coal hist ready)
                    (ActWithdraw side)
                    (PhaseAborted (ActWithdraw side))
 
-  | StepBreakBid : forall chal resp atk def hist ready side,
-      BatchallStep (PhaseBidding chal resp atk def hist ready)
+  | StepBreakBid : forall chal resp atk def atk_coal def_coal hist ready side,
+      BatchallStep (PhaseBidding chal resp atk def atk_coal def_coal hist ready)
                    (ActBreakBid side)
                    (PhaseAborted (ActBreakBid side)).
 
@@ -3301,41 +3380,41 @@ Proof.
 Qed.
 
 (** You cannot close the bidding unless both sides have passed. *)
-Lemma cannot_close_without_both_ready_neither : forall chal resp atk def hist phase',
-  ~ BatchallStep (PhaseBidding chal resp atk def hist NeitherReady) ActClose phase'.
+Lemma cannot_close_without_both_ready_neither : forall chal resp atk def ac dc hist phase',
+  ~ BatchallStep (PhaseBidding chal resp atk def ac dc hist NeitherReady) ActClose phase'.
 Proof.
-  intros chal resp atk def hist phase' H. inversion H.
+  intros chal resp atk def ac dc hist phase' H. inversion H.
 Qed.
 
-Lemma cannot_close_without_both_ready_atk : forall chal resp atk def hist phase',
-  ~ BatchallStep (PhaseBidding chal resp atk def hist AttackerReady) ActClose phase'.
+Lemma cannot_close_without_both_ready_atk : forall chal resp atk def ac dc hist phase',
+  ~ BatchallStep (PhaseBidding chal resp atk def ac dc hist AttackerReady) ActClose phase'.
 Proof.
-  intros chal resp atk def hist phase' H. inversion H.
+  intros chal resp atk def ac dc hist phase' H. inversion H.
 Qed.
 
-Lemma cannot_close_without_both_ready_def : forall chal resp atk def hist phase',
-  ~ BatchallStep (PhaseBidding chal resp atk def hist DefenderReady) ActClose phase'.
+Lemma cannot_close_without_both_ready_def : forall chal resp atk def ac dc hist phase',
+  ~ BatchallStep (PhaseBidding chal resp atk def ac dc hist DefenderReady) ActClose phase'.
 Proof.
-  intros chal resp atk def hist phase' H. inversion H.
+  intros chal resp atk def ac dc hist phase' H. inversion H.
 Qed.
 
 (** A bid that does not reduce the force metrics is invalid. *)
-Lemma cannot_bid_higher : forall chal resp atk def hist ready new_bid phase',
+Lemma cannot_bid_higher : forall chal resp atk def ac dc hist ready new_bid phase',
   bid_side new_bid = Attacker ->
   ~ fm_lt (bid_metrics new_bid) (bid_metrics atk) ->
-  ~ BatchallStep (PhaseBidding chal resp atk def hist ready) (ActBid new_bid) phase'.
+  ~ BatchallStep (PhaseBidding chal resp atk def ac dc hist ready) (ActBid new_bid) phase'.
 Proof.
-  intros chal resp atk def hist ready new_bid phase' Hside Hnot_lt Hstep.
+  intros chal resp atk def ac dc hist ready new_bid phase' Hside Hnot_lt Hstep.
   inversion Hstep; subst.
   - apply Hnot_lt. assumption.
   - congruence.
 Qed.
 
 (** You cannot pass if you have already passed and the opponent hasn't bid. *)
-Lemma cannot_double_pass : forall chal resp atk def hist phase',
-  ~ BatchallStep (PhaseBidding chal resp atk def hist AttackerReady) (ActPass Attacker) phase'.
+Lemma cannot_double_pass : forall chal resp atk def ac dc hist phase',
+  ~ BatchallStep (PhaseBidding chal resp atk def ac dc hist AttackerReady) (ActPass Attacker) phase'.
 Proof.
-  intros chal resp atk def hist phase' H. inversion H. discriminate.
+  intros chal resp atk def ac dc hist phase' H. inversion H. discriminate.
 Qed.
 
 (** You cannot issue a challenge when one is already pending. *)
@@ -3362,12 +3441,12 @@ Proof.
 Qed.
 
 (** A defender bid must reduce the defender's metrics. *)
-Lemma defender_bid_reduces_def : forall chal resp atk def hist ready new_bid phase',
+Lemma defender_bid_reduces_def : forall chal resp atk def ac dc hist ready new_bid phase',
   bid_side new_bid = Defender ->
-  BatchallStep (PhaseBidding chal resp atk def hist ready) (ActBid new_bid) phase' ->
+  BatchallStep (PhaseBidding chal resp atk def ac dc hist ready) (ActBid new_bid) phase' ->
   fm_lt (bid_metrics new_bid) (bid_metrics def).
 Proof.
-  intros chal resp atk def hist ready new_bid phase' Hnew Hstep.
+  intros chal resp atk def ac dc hist ready new_bid phase' Hnew Hstep.
   inversion Hstep; subst.
   - congruence.
   - auto.
@@ -3503,25 +3582,25 @@ Proof.
   exists (ActBid bid).
   exists (PhaseBidding chal resp bid
            (mkForceBid (resp_force resp) Defender (resp_defender resp))
-           [] NeitherReady).
+           None None [] NeitherReady).
   apply StepInitialBid.
   - reflexivity.
   - apply fm_le_refl.
 Qed.
 
-Lemma bidding_has_progress : forall chal resp atk def hist ready,
-  can_progress (PhaseBidding chal resp atk def hist ready).
+Lemma bidding_has_progress : forall chal resp atk def ac dc hist ready,
+  can_progress (PhaseBidding chal resp atk def ac dc hist ready).
 Proof.
-  intros chal resp atk def hist ready. unfold can_progress.
+  intros chal resp atk def ac dc hist ready. unfold can_progress.
   destruct ready.
   - exists (ActPass Attacker).
-    exists (PhaseBidding chal resp atk def hist AttackerReady).
+    exists (PhaseBidding chal resp atk def ac dc hist AttackerReady).
     apply StepPassAttacker. reflexivity.
   - exists (ActPass Defender).
-    exists (PhaseBidding chal resp atk def hist BothReady).
+    exists (PhaseBidding chal resp atk def ac dc hist BothReady).
     apply StepPassDefender. reflexivity.
   - exists (ActPass Attacker).
-    exists (PhaseBidding chal resp atk def hist BothReady).
+    exists (PhaseBidding chal resp atk def ac dc hist BothReady).
     apply StepPassAttacker. reflexivity.
   - exists ActClose.
     exists (PhaseAgreed chal resp atk def).
@@ -3559,7 +3638,7 @@ Definition phase_depth (phase : BatchallPhase) : nat :=
   | PhaseIdle => 4
   | PhaseChallenged _ => 3
   | PhaseResponded _ _ => 2
-  | PhaseBidding _ _ _ _ _ _ => 1
+  | PhaseBidding _ _ _ _ _ _ _ _ => 1
   | PhaseAgreed _ _ _ _ => 0
   | PhaseRefused _ _ => 0
   | PhaseAborted _ => 0
@@ -3591,40 +3670,31 @@ Proof.
 Qed.
 
 (** Bidding steps either decrease the measure or reach terminal. *)
-Lemma bidding_step_progress : forall chal resp atk def hist ready action phase',
-  BatchallStep (PhaseBidding chal resp atk def hist ready) action phase' ->
-  (exists atk' def' hist' ready',
-     phase' = PhaseBidding chal resp atk' def' hist' ready' /\
+Lemma bidding_step_progress : forall chal resp atk def ac dc hist ready action phase',
+  BatchallStep (PhaseBidding chal resp atk def ac dc hist ready) action phase' ->
+  (exists atk' def' ac' dc' hist' ready',
+     phase' = PhaseBidding chal resp atk' def' ac' dc' hist' ready' /\
      bidding_state_measure atk' def' ready' < bidding_state_measure atk def ready) \/
   is_terminal phase' = true.
 Proof.
-  intros chal resp atk def hist ready action phase' Hstep.
+  intros chal resp atk def ac dc hist ready action phase' Hstep.
   inversion Hstep; subst.
-  - left. exists new_bid, def, (atk :: hist), (clear_ready ready Attacker).
-    split; [reflexivity |].
+  - left. eexists _, _, _, _, _, _. split; [reflexivity |].
     apply bid_decrease_with_clear_ready.
     apply fm_lt_implies_measure_lt. assumption.
-  - left. exists atk, new_bid, (def :: hist), (clear_ready ready Defender).
-    split; [reflexivity |].
+  - left. eexists _, _, _, _, _, _. split; [reflexivity |].
     apply def_bid_decrease_with_clear_ready.
     apply fm_lt_implies_measure_lt. assumption.
-  - left. exists (mkForceBid (cmb_new_force cbid) Attacker (bid_commander atk)),
-                 def, (atk :: hist), (clear_ready ready Attacker).
-    split; [reflexivity |].
+  - left. eexists _, _, _, _, _, _. split; [reflexivity |].
     apply bid_decrease_with_clear_ready.
     apply fm_lt_implies_measure_lt. unfold bid_metrics. simpl. assumption.
-  - left. exists atk,
-                 (mkForceBid (cmb_new_force cbid) Defender (bid_commander def)),
-                 (def :: hist), (clear_ready ready Defender).
-    split; [reflexivity |].
+  - left. eexists _, _, _, _, _, _. split; [reflexivity |].
     apply def_bid_decrease_with_clear_ready.
     apply fm_lt_implies_measure_lt. unfold bid_metrics. simpl. assumption.
-  - left. exists atk, def, hist, (set_ready ready Attacker).
-    split; [reflexivity |].
+  - left. eexists _, _, _, _, _, _. split; [reflexivity |].
     unfold bidding_state_measure, set_ready.
     destruct ready; simpl in *; try discriminate; lia.
-  - left. exists atk, def, hist, (set_ready ready Defender).
-    split; [reflexivity |].
+  - left. eexists _, _, _, _, _, _. split; [reflexivity |].
     unfold bidding_state_measure, set_ready.
     destruct ready; simpl in *; try discriminate; lia.
   - right. reflexivity.
@@ -3657,15 +3727,15 @@ Proof.
 Qed.
 
 (** Bidding phases have bounded iterations. *)
-Lemma bidding_bounded_iterations : forall chal resp atk def hist ready,
+Lemma bidding_bounded_iterations : forall chal resp atk def ac dc hist ready,
   forall action phase',
-    BatchallStep (PhaseBidding chal resp atk def hist ready) action phase' ->
+    BatchallStep (PhaseBidding chal resp atk def ac dc hist ready) action phase' ->
     is_terminal phase' = true \/
-    (exists atk' def' hist' ready',
-       phase' = PhaseBidding chal resp atk' def' hist' ready' /\
+    (exists atk' def' ac' dc' hist' ready',
+       phase' = PhaseBidding chal resp atk' def' ac' dc' hist' ready' /\
        bidding_state_measure atk' def' ready' < bidding_state_measure atk def ready).
 Proof.
-  intros chal resp atk def hist ready action phase' Hstep.
+  intros chal resp atk def ac dc hist ready action phase' Hstep.
   destruct (bidding_step_progress Hstep) as [H | H].
   - right. exact H.
   - left. exact H.
@@ -3674,23 +3744,23 @@ Qed.
 (** A clean termination statement using the bidding measure.
     The bidding phase is accessible in the well-founded ordering based
     on the bidding_state_measure. *)
-Theorem bidding_phase_terminates : forall chal resp atk def hist ready,
+Theorem bidding_phase_terminates : forall chal resp atk def ac dc hist ready,
   Acc (fun p1 p2 =>
          match p1, p2 with
-         | PhaseBidding _ _ a1 d1 _ r1, PhaseBidding _ _ a2 d2 _ r2 =>
+         | PhaseBidding _ _ a1 d1 _ _ _ r1, PhaseBidding _ _ a2 d2 _ _ _ r2 =>
              bidding_state_measure a1 d1 r1 < bidding_state_measure a2 d2 r2
          | _, _ => False
          end)
-      (PhaseBidding chal resp atk def hist ready).
+      (PhaseBidding chal resp atk def ac dc hist ready).
 Proof.
-  intros chal resp atk def hist ready.
+  intros chal resp atk def ac dc hist ready.
   remember (bidding_state_measure atk def ready) as n eqn:Hn.
-  revert chal resp atk def hist ready Hn.
+  revert chal resp atk def ac dc hist ready Hn.
   induction n as [n IH] using lt_wf_ind.
-  intros chal resp atk def hist ready Hn.
+  intros chal resp atk def ac dc hist ready Hn.
   apply Acc_intro.
   intros phase' Hrel.
-  destruct phase' as [| | | chal' resp' atk' def' hist' ready' | | |];
+  destruct phase' as [| | | chal' resp' atk' def' ac' dc' hist' ready' | | |];
     simpl in Hrel; try contradiction.
   apply IH with (m := bidding_state_measure atk' def' ready').
   - rewrite Hn. exact Hrel.
@@ -3714,7 +3784,7 @@ Qed.
 
 Definition get_bidding_measure (phase : BatchallPhase) : nat :=
   match phase with
-  | PhaseBidding _ _ atk def _ ready => bidding_state_measure atk def ready
+  | PhaseBidding _ _ atk def _ _ _ ready => bidding_state_measure atk def ready
   | _ => 0
   end.
 
@@ -3848,8 +3918,8 @@ Qed.
 Theorem batchall_protocol_terminates :
   forall phase, is_terminal phase = true \/
     (is_bidding phase = true /\
-     exists chal resp atk def hist ready,
-       phase = PhaseBidding chal resp atk def hist ready) \/
+     exists chal resp atk def ac dc hist ready,
+       phase = PhaseBidding chal resp atk def ac dc hist ready) \/
     (exists action phase', BatchallStep phase action phase' /\
        (is_terminal phase' = true \/ is_bidding phase' = true \/
         phase_depth phase' < phase_depth phase)).
@@ -3860,7 +3930,7 @@ Proof.
   - destruct (is_bidding phase) eqn:Hbid.
     + right. left. split; [reflexivity |].
       destruct phase; simpl in *; try discriminate.
-      eauto 10.
+      eauto 12.
     + right. right.
       destruct phase as [| ch | ch resp | | | |]; simpl in *; try discriminate.
       * set (chal := mkBatchallChallenge
@@ -3902,7 +3972,7 @@ Definition initial_state : BatchallState :=
 (** Extract the commander for a given side from a bidding phase. *)
 Definition get_side_commander (phase : BatchallPhase) (side : Side) : option Commander :=
   match phase with
-  | PhaseBidding _ _ atk def _ _ =>
+  | PhaseBidding _ _ atk def _ _ _ _ =>
       match side with
       | Attacker => Some (bid_commander atk)
       | Defender => Some (bid_commander def)
@@ -3973,8 +4043,8 @@ Proof.
 Qed.
 
 (** Breaking a bid severely damages honor - the breaker loses 10 honor. *)
-Lemma break_bid_damages_honor : forall s1 s2 chal resp atk def hist ready side,
-  bs_phase s1 = PhaseBidding chal resp atk def hist ready ->
+Lemma break_bid_damages_honor : forall s1 s2 chal resp atk def ac dc hist ready side,
+  bs_phase s1 = PhaseBidding chal resp atk def ac dc hist ready ->
   BatchallStateStep s1 (ActBreakBid side) s2 ->
   let actor := match side with
                | Attacker => bid_commander atk
@@ -3982,7 +4052,7 @@ Lemma break_bid_damages_honor : forall s1 s2 chal resp atk def hist ready side,
                end in
   ledger_honor (bs_honor s2) actor = (ledger_honor (bs_honor s1) actor - 10)%Z.
 Proof.
-  intros s1 s2 chal resp atk def hist ready side Hphase Hstep.
+  intros s1 s2 chal resp atk def ac dc hist ready side Hphase Hstep.
   inversion Hstep; subst. simpl in *.
   unfold action_actor_in_phase, get_side_commander.
   rewrite Hphase. destruct side; simpl.
@@ -4002,7 +4072,7 @@ Definition get_challenge_from_phase (phase : BatchallPhase) : option BatchallCha
   | PhaseIdle => None
   | PhaseChallenged chal => Some chal
   | PhaseResponded chal _ => Some chal
-  | PhaseBidding chal _ _ _ _ _ => Some chal
+  | PhaseBidding chal _ _ _ _ _ _ _ => Some chal
   | PhaseAgreed chal _ _ _ => Some chal
   | PhaseRefused chal _ => Some chal
   | PhaseAborted _ => None
@@ -4045,13 +4115,13 @@ Inductive BatchallContextStep : BatchallState -> ProtocolAction -> BatchallState
       BatchallContextStep s1 action s2.
 
 (** In a Trial of Annihilation, withdrawal is forbidden. *)
-Lemma annihilation_forbids_withdrawal : forall s1 s2 side chal resp atk def hist ready,
-  bs_phase s1 = PhaseBidding chal resp atk def hist ready ->
+Lemma annihilation_forbids_withdrawal : forall s1 s2 side chal resp atk def ac dc hist ready,
+  bs_phase s1 = PhaseBidding chal resp atk def ac dc hist ready ->
   chal_trial_type chal = TrialOfAnnihilation ->
   challenge_context_valid chal ->
   ~ BatchallContextStep s1 (ActWithdraw side) s2.
 Proof.
-  intros s1 s2 side chal resp atk def hist ready Hphase Htrial Hvalid Hstep.
+  intros s1 s2 side chal resp atk def ac dc hist ready Hphase Htrial Hvalid Hstep.
   inversion Hstep; subst.
   unfold action_respects_context in H0.
   rewrite Hphase in H0. simpl in H0.
@@ -4227,15 +4297,15 @@ Definition phase_after_response : BatchallPhase :=
 
 Definition phase_after_initial_bid : BatchallPhase :=
   PhaseBidding malthus_challenge radick_response
-    initial_falcon_bid initial_wolf_bid [] NeitherReady.
+    initial_falcon_bid initial_wolf_bid None None [] NeitherReady.
 
 Definition phase_after_atk_pass : BatchallPhase :=
   PhaseBidding malthus_challenge radick_response
-    initial_falcon_bid initial_wolf_bid [] AttackerReady.
+    initial_falcon_bid initial_wolf_bid None None [] AttackerReady.
 
 Definition phase_after_def_pass : BatchallPhase :=
   PhaseBidding malthus_challenge radick_response
-    initial_falcon_bid initial_wolf_bid [] BothReady.
+    initial_falcon_bid initial_wolf_bid None None [] BothReady.
 
 Definition phase_agreed : BatchallPhase :=
   PhaseAgreed malthus_challenge radick_response
