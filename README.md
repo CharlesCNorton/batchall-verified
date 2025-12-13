@@ -160,7 +160,7 @@ MIT License. See [LICENSE](LICENSE).
                               │                     │
                               │   Let it be true.   │
                               │                     │
-                              │       ☩ SEYLA ☩     │
+                              │       ☩ SEYLA ☩    │
                               │                     │
                               ╰─────────────────────╯
 ```
