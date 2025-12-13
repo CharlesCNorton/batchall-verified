@@ -2964,7 +2964,7 @@ Inductive ProtocolAction : Type :=
   | ActPass (side : Side)
   | ActClose
   | ActWithdraw (side : Side)
-  | ActBreakBid.  (* Dishonorably abandoning a committed bid *)
+  | ActBreakBid (side : Side).  (* Dishonorably abandoning a committed bid *)
 
 (** Honor deltas for protocol actions. These are the core honor mechanics
     of the batchall itself. *)
@@ -2990,7 +2990,7 @@ Definition protocol_honor_delta (action : ProtocolAction) : Honor :=
   | ActPass _ => 0         (* Passing is neutral *)
   | ActClose => 1          (* Concluding honorably *)
   | ActWithdraw _ => -2    (* Withdrawing loses some honor *)
-  | ActBreakBid => -10     (* Breaking a bid is severely dishonorable *)
+  | ActBreakBid _ => -10   (* Breaking a bid is severely dishonorable *)
   end.
 
 Close Scope Z_scope.
@@ -3209,10 +3209,10 @@ Inductive BatchallStep : BatchallPhase -> ProtocolAction -> BatchallPhase -> Pro
                    (ActWithdraw side)
                    (PhaseAborted (ActWithdraw side))
 
-  | StepBreakBid : forall chal resp atk def hist ready,
+  | StepBreakBid : forall chal resp atk def hist ready side,
       BatchallStep (PhaseBidding chal resp atk def hist ready)
-                   ActBreakBid
-                   (PhaseAborted ActBreakBid).
+                   (ActBreakBid side)
+                   (PhaseAborted (ActBreakBid side)).
 
 (** ** Protocol Traces
 
@@ -3697,18 +3697,142 @@ Proof.
   - reflexivity.
 Qed.
 
-(** Corollary: All traces from any phase eventually terminate. *)
-Corollary all_batchall_traces_finite : forall phase,
+(** ** Lexicographic Termination Order
+
+    To prove termination properly, we use a lexicographic ordering:
+    1. First compare phase_depth (non-bidding phases have higher depth)
+    2. If both are bidding phases, compare bidding_state_measure
+
+    This avoids the problem of pre-bidding phase measures being smaller
+    than bidding measures. *)
+
+(** Lexicographic "less than" on phases:
+    p1 <_lex p2 iff either:
+    - phase_depth p1 < phase_depth p2, OR
+    - phase_depth p1 = phase_depth p2 = 1 (both bidding) and
+      bidding measure of p1 < bidding measure of p2 *)
+
+Definition get_bidding_measure (phase : BatchallPhase) : nat :=
+  match phase with
+  | PhaseBidding _ _ atk def _ ready => bidding_state_measure atk def ready
+  | _ => 0
+  end.
+
+Definition phase_lex_lt (p1 p2 : BatchallPhase) : Prop :=
+  phase_depth p1 < phase_depth p2 \/
+  (phase_depth p1 = phase_depth p2 /\ get_bidding_measure p1 < get_bidding_measure p2).
+
+(** Every step either reaches terminal or decreases in lex order. *)
+Lemma step_lex_decreases : forall phase action phase',
+  BatchallStep phase action phase' ->
+  is_terminal phase' = true \/ phase_lex_lt phase' phase.
+Proof.
+  intros phase action phase' Hstep.
+  unfold phase_lex_lt.
+  inversion Hstep; subst; simpl.
+  - right. left. lia.
+  - right. left. lia.
+  - left. reflexivity.
+  - right. left. lia.
+  - right. right. split; [reflexivity |].
+    apply bid_decrease_with_clear_ready.
+    apply fm_lt_implies_measure_lt. assumption.
+  - right. right. split; [reflexivity |].
+    apply def_bid_decrease_with_clear_ready.
+    apply fm_lt_implies_measure_lt. assumption.
+  - right. right. split; [reflexivity |].
+    apply bid_decrease_with_clear_ready.
+    apply fm_lt_implies_measure_lt. unfold bid_metrics. simpl. assumption.
+  - right. right. split; [reflexivity |].
+    apply def_bid_decrease_with_clear_ready.
+    apply fm_lt_implies_measure_lt. unfold bid_metrics. simpl. assumption.
+  - right. right. split; [reflexivity |].
+    unfold bidding_state_measure, set_ready.
+    destruct ready; simpl in *; try discriminate; lia.
+  - right. right. split; [reflexivity |].
+    unfold bidding_state_measure, set_ready.
+    destruct ready; simpl in *; try discriminate; lia.
+  - left. reflexivity.
+  - left. reflexivity.
+  - left. reflexivity.
+Qed.
+
+(** Lex order is well-founded. We prove this by mapping to pairs of naturals
+    with the standard lexicographic ordering. *)
+Definition phase_to_lex_pair (p : BatchallPhase) : nat * nat :=
+  (phase_depth p, get_bidding_measure p).
+
+Lemma lex_lt_implies_pair_lt : forall p1 p2,
+  phase_lex_lt p1 p2 ->
+  let (d1, m1) := phase_to_lex_pair p1 in
+  let (d2, m2) := phase_to_lex_pair p2 in
+  d1 < d2 \/ (d1 = d2 /\ m1 < m2).
+Proof.
+  intros p1 p2 Hlex.
+  unfold phase_to_lex_pair, phase_lex_lt in *.
+  exact Hlex.
+Qed.
+
+(** The step relation decreases the lex order. *)
+Definition step_rel (p1 p2 : BatchallPhase) : Prop :=
+  exists action, BatchallStep p2 action p1 /\ is_terminal p1 = false.
+
+(** phase_lex_lt is well-founded.
+    We prove this directly by nested well-founded induction. *)
+Lemma phase_lex_lt_wf : well_founded phase_lex_lt.
+Proof.
+  intros phase.
+  remember (phase_depth phase) as d eqn:Hd.
+  revert phase Hd.
+  induction d as [d IHd] using lt_wf_ind.
+  intros phase Hd.
+  remember (get_bidding_measure phase) as m eqn:Hm.
+  revert phase Hd Hm.
+  induction m as [m IHm] using lt_wf_ind.
+  intros phase Hd Hm.
+  apply Acc_intro.
+  intros phase' [Hdepth_lt | [Hdepth_eq Hmeas_lt]].
+  - eapply IHd.
+    + rewrite Hd. exact Hdepth_lt.
+    + reflexivity.
+  - eapply IHm.
+    + rewrite Hm. exact Hmeas_lt.
+    + rewrite Hd. symmetry. exact Hdepth_eq.
+    + reflexivity.
+Qed.
+
+(** step_rel implies phase_lex_lt (when target is non-terminal). *)
+Lemma step_rel_implies_lex_lt : forall p1 p2,
+  step_rel p1 p2 -> phase_lex_lt p1 p2.
+Proof.
+  intros p1 p2 [action [Hstep Hnon_term]].
+  destruct (step_lex_decreases Hstep) as [Hterm | Hlex].
+  - rewrite Hterm in Hnon_term. discriminate.
+  - exact Hlex.
+Qed.
+
+(** The batchall protocol terminates: the step relation is well-founded. *)
+Theorem batchall_termination_strong : forall phase, Acc step_rel phase.
+Proof.
+  intros phase.
+  induction phase using (well_founded_ind phase_lex_lt_wf).
+  apply Acc_intro. intros phase' Hrel.
+  apply H. apply step_rel_implies_lex_lt. exact Hrel.
+Qed.
+
+(** Corollary: Every step from a non-terminal phase either reaches terminal
+    or decreases in the lexicographic order. *)
+Corollary all_batchall_traces_bounded : forall phase,
   is_terminal phase = true \/
-  exists max_steps, forall n,
-    n > max_steps ->
-    forall (steps : nat -> option (ProtocolAction * BatchallPhase)),
-      True.  (* Simplified statement - full version would track actual traces *)
+  (forall action phase',
+     BatchallStep phase action phase' ->
+     is_terminal phase' = true \/ phase_lex_lt phase' phase).
 Proof.
   intros phase.
   destruct (is_terminal phase) eqn:Hterm.
   - left. reflexivity.
-  - right. exists 0. intros. trivial.
+  - right. intros action phase' Hstep.
+    exact (step_lex_decreases Hstep).
 Qed.
 
 (** ** The Central Termination Theorem
@@ -3775,25 +3899,39 @@ Record BatchallState : Type := mkBatchallState {
 Definition initial_state : BatchallState :=
   mkBatchallState PhaseIdle empty_ledger.
 
-(** Extract the actor from a protocol action. *)
-Definition action_actor (action : ProtocolAction) : option Commander :=
+(** Extract the commander for a given side from a bidding phase. *)
+Definition get_side_commander (phase : BatchallPhase) (side : Side) : option Commander :=
+  match phase with
+  | PhaseBidding _ _ atk def _ _ =>
+      match side with
+      | Attacker => Some (bid_commander atk)
+      | Defender => Some (bid_commander def)
+      end
+  | _ => None
+  end.
+
+(** Extract the actor from a protocol action, using phase context when needed.
+    This fixes the bug where ActWithdraw and ActBreakBid were not attributed to anyone. *)
+Definition action_actor_in_phase (phase : BatchallPhase) (action : ProtocolAction) : option Commander :=
   match action with
   | ActChallenge chal => Some (chal_challenger chal)
   | ActRespond resp => Some (resp_defender resp)
-  | ActRefuse _ => None
+  | ActRefuse _ => None  (* Refuser identity not tracked in current model *)
   | ActBid bid => Some (bid_commander bid)
   | ActCoalitionBid _ => None  (* Coalition bids affect the coalition, not individual honor *)
-  | ActPass _ => None
-  | ActClose => None
-  | ActWithdraw _ => None
-  | ActBreakBid => None
+  | ActPass _ => None          (* Passing is neutral, no honor change *)
+  | ActClose => None           (* Close is mutual agreement *)
+  | ActWithdraw side => get_side_commander phase side
+  | ActBreakBid side => get_side_commander phase side
   end.
 
-(** The stateful step relation: phase transitions plus honor updates. *)
+(** The stateful step relation: phase transitions plus honor updates.
+    Uses action_actor_in_phase to correctly attribute honor changes for
+    ActWithdraw and ActBreakBid based on phase context. *)
 Inductive BatchallStateStep : BatchallState -> ProtocolAction -> BatchallState -> Prop :=
   | StateStep : forall phase1 phase2 ledger action new_ledger,
       BatchallStep phase1 action phase2 ->
-      new_ledger = match action_actor action with
+      new_ledger = match action_actor_in_phase phase1 action with
                    | Some actor => update_honor ledger actor (protocol_honor_delta action)
                    | None => ledger
                    end ->
@@ -3834,14 +3972,22 @@ Proof.
   apply honor_update_self.
 Qed.
 
-(** Breaking a bid severely damages honor. *)
-Lemma break_bid_damages_honor : forall s1 s2 chal resp atk def hist ready,
+(** Breaking a bid severely damages honor - the breaker loses 10 honor. *)
+Lemma break_bid_damages_honor : forall s1 s2 chal resp atk def hist ready side,
   bs_phase s1 = PhaseBidding chal resp atk def hist ready ->
-  BatchallStateStep s1 ActBreakBid s2 ->
-  bs_honor s2 = bs_honor s1.
+  BatchallStateStep s1 (ActBreakBid side) s2 ->
+  let actor := match side with
+               | Attacker => bid_commander atk
+               | Defender => bid_commander def
+               end in
+  ledger_honor (bs_honor s2) actor = (ledger_honor (bs_honor s1) actor - 10)%Z.
 Proof.
-  intros s1 s2 chal resp atk def hist ready Hphase Hstep.
-  inversion Hstep; subst. simpl in *. reflexivity.
+  intros s1 s2 chal resp atk def hist ready side Hphase Hstep.
+  inversion Hstep; subst. simpl in *.
+  unfold action_actor_in_phase, get_side_commander.
+  rewrite Hphase. destruct side; simpl.
+  - apply honor_update_self.
+  - apply honor_update_self.
 Qed.
 
 (** ** Context-Aware State Transitions
@@ -4180,7 +4326,7 @@ Proof. reflexivity. Qed.
 Example withdraw_dishonor : protocol_honor_delta (ActWithdraw Attacker) = -2.
 Proof. reflexivity. Qed.
 
-Example break_bid_dishonor : protocol_honor_delta ActBreakBid = -10.
+Example break_bid_dishonor : protocol_honor_delta (ActBreakBid Attacker) = -10.
 Proof. reflexivity. Qed.
 
 Example hegira_violation_dishonor : hegira_honor_delta HegiraViolate = -15.
@@ -4233,3 +4379,4 @@ End StandardTrials.
 (*     Seyla.                                                                 *)
 (*                                                                            *)
 (******************************************************************************)
+
